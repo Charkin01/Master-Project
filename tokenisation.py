@@ -2,9 +2,10 @@ import os
 import json
 from datasets import load_dataset
 from transformers import BertTokenizer
+import tensorflow as tf
 
-# Load a subset of the dataset (first 10000 samples)
-dataset = load_dataset("nvidia/OpenMathInstruct-1", split='train[:10000]')
+# Load a subset of the dataset (first 200 samples)
+dataset = load_dataset("nvidia/OpenMathInstruct-1", split='train[:200]')
 
 # Initialize the tokenizer
 tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
@@ -65,42 +66,60 @@ def tokenize_example(examples):
 # Apply the tokenize function to the dataset
 tokenized_dataset = dataset.map(tokenize_example, batched=True, remove_columns=dataset.column_names)
 
-# Convert to TensorFlow format (if needed)
-def convert_to_tf_dataset(tokenized_dataset):
-    import tensorflow as tf
-    def gen():
-        for ex in tokenized_dataset:
-            yield ({
-                'input_ids': tf.convert_to_tensor(ex['input_ids'], dtype=tf.int32),
-                'attention_mask': tf.convert_to_tensor(ex['attention_mask'], dtype=tf.int32),
-                'token_type_ids': tf.convert_to_tensor(ex['token_type_ids'], dtype=tf.int32)
-            }, {
-                'start_positions': tf.convert_to_tensor(ex['start_positions'], dtype=tf.int32),
-                'end_positions': tf.convert_to_tensor(ex['end_positions'], dtype=tf.int32)
-            })
+# Step 1: Mapping to Features
+def to_feature_map(batch):
+    return {
+        'input_ids': tf.convert_to_tensor(batch['input_ids'], dtype=tf.int32),
+        'attention_mask': tf.convert_to_tensor(batch['attention_mask'], dtype=tf.int32),
+        'token_type_ids': tf.convert_to_tensor(batch['token_type_ids'], dtype=tf.int32),
+        'start_positions': tf.convert_to_tensor(batch['start_positions'], dtype=tf.int32),
+        'end_positions': tf.convert_to_tensor(batch['end_positions'], dtype=tf.int32)
+    }
 
-    return tf.data.Dataset.from_generator(
-        gen,
-        ({
-            'input_ids': tf.int32,
-            'attention_mask': tf.int32,
-            'token_type_ids': tf.int32
+# Convert tokenized dataset to feature map
+tokenized_dataset = tokenized_dataset.map(to_feature_map, batched=True)
+
+# Step 2: Shuffling
+buffer_size = 1000
+tokenized_dataset = tokenized_dataset.shuffle(seed=42)
+
+# Convert to TensorFlow dataset
+def gen():
+    for ex in tokenized_dataset:
+        yield {
+            'input_ids': ex['input_ids'],
+            'attention_mask': ex['attention_mask'],
+            'token_type_ids': ex['token_type_ids']
         }, {
-            'start_positions': tf.int32,
-            'end_positions': tf.int32
-        }),
-        ({
-            'input_ids': tf.TensorShape([512]),
-            'attention_mask': tf.TensorShape([512]),
-            'token_type_ids': tf.TensorShape([512])
-        }, {
-            'start_positions': tf.TensorShape([]),
-            'end_positions': tf.TensorShape([])
-        }))
+            'start_positions': ex['start_positions'],
+            'end_positions': ex['end_positions']
+        }
 
-tf_dataset = convert_to_tf_dataset(tokenized_dataset)
+tf_dataset = tf.data.Dataset.from_generator(
+    gen,
+    ({
+        'input_ids': tf.int32,
+        'attention_mask': tf.int32,
+        'token_type_ids': tf.int32
+    }, {
+        'start_positions': tf.int32,
+        'end_positions': tf.int32
+    }),
+    ({
+        'input_ids': tf.TensorShape([512]),
+        'attention_mask': tf.TensorShape([512]),
+        'token_type_ids': tf.TensorShape([512])
+    }, {
+        'start_positions': tf.TensorShape([]),
+        'end_positions': tf.TensorShape([])
+    })
+)
 
-# Save TensorFlow dataset as a single JSON file
+# Step 3: Batching, Caching, and Prefetching
+batch_size = 32
+tf_dataset = tf_dataset.batch(batch_size).cache().prefetch(buffer_size=tf.data.experimental.AUTOTUNE)
+
+# Save TensorFlow dataset as a single JSON file (if needed)
 def save_tf_dataset_as_json(dataset, filepath):
     with open(filepath, 'w') as f:
         for example in dataset:
