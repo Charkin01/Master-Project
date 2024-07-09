@@ -1,9 +1,7 @@
 import os
 import json
-import tensorflow as tf
 from datasets import load_dataset
 from transformers import BertTokenizer
-import numpy as np
 
 # Load a subset of the dataset (first 10000 samples)
 dataset = load_dataset("nvidia/OpenMathInstruct-1", split='train[:10000]')
@@ -13,34 +11,63 @@ tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
 
 # Tokenize dataset with a check for sequence length
 def tokenize_example(examples):
-    # Tokenize the question and generated_solution fields
-    encodings = tokenizer(
-        examples['question'],
-        examples['generated_solution'],
-        max_length=512,
-        truncation=False,  # Do not truncate, check length manually
-        padding='max_length',
-        add_special_tokens=True
-    )
+    input_ids_list = []
+    attention_mask_list = []
+    token_type_ids_list = []
+    start_positions_list = []
+    end_positions_list = []
+    skipped_examples = 0
+    processed_examples = 0
     
-    # Check if input_ids length is within limit
-    input_ids = encodings['input_ids']
-    valid_indices = [i for i, ids in enumerate(input_ids) if len(ids) <= 512]
+    for question, generated_solution in zip(examples['question'], examples['generated_solution']):
+        # Tokenize the question and generated_solution fields
+        question_encodings = tokenizer(question, add_special_tokens=True)
+        answer_encodings = tokenizer(generated_solution, add_special_tokens=True)
+        
+        # Combine input_ids, token_type_ids, and attention_mask
+        combined_input_ids = question_encodings['input_ids'] + answer_encodings['input_ids'][1:]  # [1:] to remove the first [CLS] token from answer
+        combined_token_type_ids = [0] * len(question_encodings['input_ids']) + [1] * (len(answer_encodings['input_ids']) - 1)
+        combined_attention_mask = [1] * len(combined_input_ids)
+
+        # Check if input_ids length is within limit
+        if len(combined_input_ids) > 512:
+            skipped_examples += 1
+            continue  # Skip this example
+
+        # Padding/truncating to 512
+        padding_length = 512 - len(combined_input_ids)
+        combined_input_ids += [0] * padding_length
+        combined_token_type_ids += [0] * padding_length
+        combined_attention_mask += [0] * padding_length
+
+        # Adding start and end positions
+        start_positions = len(question_encodings['input_ids']) - 1  # The first token of the answer
+        end_positions = start_positions + len(answer_encodings['input_ids']) - 2  # Adjust for [SEP] token
+
+        input_ids_list.append(combined_input_ids)
+        attention_mask_list.append(combined_attention_mask)
+        token_type_ids_list.append(combined_token_type_ids)
+        start_positions_list.append(start_positions)
+        end_positions_list.append(end_positions)
+        processed_examples += 1
     
-    # Filter out invalid examples
-    encodings = {key: [val[i] for i in valid_indices] for key, val in encodings.items()}
+    print(f"Skipped examples: {skipped_examples}")
+    print(f"Processed examples: {processed_examples}")
     
-    # Adding start and end positions (dummy values for now)
-    encodings['start_positions'] = [0] * len(encodings['input_ids'])
-    encodings['end_positions'] = [0] * len(encodings['input_ids'])
-    
-    return encodings
+    return {
+        'input_ids': input_ids_list,
+        'attention_mask': attention_mask_list,
+        'token_type_ids': token_type_ids_list,
+        'start_positions': start_positions_list,
+        'end_positions': end_positions_list
+    }
 
 # Apply the tokenize function to the dataset
 tokenized_dataset = dataset.map(tokenize_example, batched=True, remove_columns=dataset.column_names)
 
-# Convert to TensorFlow format
+# Convert to TensorFlow format (if needed)
 def convert_to_tf_dataset(tokenized_dataset):
+    import tensorflow as tf
     def gen():
         for ex in tokenized_dataset:
             yield ({

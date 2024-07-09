@@ -15,11 +15,22 @@ if gpus:
 else:
     print("TensorFlow is not using the GPU")
 
+# verify_imports.py
 
-# verify_pyarrow.py
+try:
+    import transformers
+    print("Transformers imported successfully!")
+except ImportError as e:
+    print(f"Error importing transformers: {e}")
+
+try:
+    import datasets
+    print("Datasets imported successfully!")
+except ImportError as e:
+    print(f"Error importing datasets: {e}")
+
 try:
     import pyarrow as pa
     print("PyArrow imported successfully!")
 except ImportError as e:
     print(f"Error importing PyArrow: {e}")
-
