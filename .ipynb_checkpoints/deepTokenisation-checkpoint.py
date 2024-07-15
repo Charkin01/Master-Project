@@ -6,8 +6,13 @@ from transformers import BertTokenizer
 # Initialize the tokenizer
 tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
 
-# Add a single custom token to the tokenizer
-special_tokens = ['<gen_type_start>', '<gen_type_end>', 'masked_reference_solution', 'without_reference_solution']
+# Add custom tokens to the tokenizer
+special_tokens = [
+    '<gen_type_start>', '<gen_type_end>', 
+    'masked_reference_solution', 'without_reference_solution',
+    '<error_start>', '<error_end>', 'timeout', '<not_executed>',
+    '<answer_info_start>', '<answer_info_end>'
+]
 tokenizer.add_tokens(special_tokens)
 
 # Function to tokenize dataset with a check for sequence length
@@ -17,69 +22,78 @@ def tokenize_example(examples, tokenizer):
     token_type_ids_list = []
     start_positions_list = []
     end_positions_list = []
-    skipped_samples = []  # List to track skipped samples
 
-    for i, (question, generated_solution, generation_type) in enumerate(zip(
-        examples['question'], examples['generated_solution'], examples['generation_type']
+    for i, (question, generated_solution, generation_type, error_message, predicted_answer, expected_answer, is_correct) in enumerate(zip(
+        examples['question'], examples['generated_solution'], examples['generation_type'], 
+        examples['error_message'], examples['predicted_answer'], examples['expected_answer'], examples['is_correct']
     )):
         # Add custom tokens for generation type with start and end tokens
         gen_type_token = f"<gen_type_start> {generation_type} <gen_type_end>"
 
-        # Tokenize the question, generation type token, and generated_solution fields
+        # Determine the correct error token
+        if error_message == '<not_executed>':
+            error_token = '<not_executed>'
+        elif error_message == 'timeout':
+            error_token = 'timeout'
+        else:
+            error_token = 'none'
+
+        # Add custom token for error with start and end tokens
+        error_token = f"<error_start> {error_token} <error_end>"
+
+        # Add custom token for answer info with start and end tokens
+        answer_info_token = f"<answer_info_start> {predicted_answer} {expected_answer} {is_correct} <answer_info_end>"
+
+        # Tokenize the question, error token, answer info token, generation type token, and generated_solution fields
         question_encodings = tokenizer(question, add_special_tokens=True, truncation=True)
+        error_encodings = tokenizer(error_token, add_special_tokens=False)
+        answer_info_encodings = tokenizer(answer_info_token, add_special_tokens=False)
         gen_type_encodings = tokenizer(gen_type_token, add_special_tokens=False)
         answer_encodings = tokenizer(generated_solution, add_special_tokens=True, truncation=True)
         
         # Combine input_ids, token_type_ids, and attention_mask
         combined_input_ids = (
             question_encodings['input_ids'] + 
+            error_encodings['input_ids'] + 
+            answer_info_encodings['input_ids'] + 
             gen_type_encodings['input_ids'] + 
             answer_encodings['input_ids'][1:]  # [1:] to remove the first [CLS] token from answer
         )
         combined_token_type_ids = (
             [0] * len(question_encodings['input_ids']) + 
+            [1] * len(error_encodings['input_ids']) + 
+            [1] * len(answer_info_encodings['input_ids']) + 
             [1] * len(gen_type_encodings['input_ids']) + 
             [1] * (len(answer_encodings['input_ids']) - 1)
         )
         combined_attention_mask = [1] * len(combined_input_ids)
 
-        # Check if input_ids length is within limit
-        if len(combined_input_ids) > 512:
-            skipped_samples.append({
-                'length': len(combined_input_ids),
-                'input_ids': combined_input_ids,
-                'question': question,
-                'generated_solution': generated_solution
-            })
-            continue  # Skip this example
+        # Check for the [UNK] token in the combined input_ids
+        if tokenizer.unk_token_id in combined_input_ids:
+            continue
 
-        # Padding to 512
-        padding_length = 512 - len(combined_input_ids)
-        combined_input_ids += [0] * padding_length
-        combined_token_type_ids += [0] * padding_length
-        combined_attention_mask += [0] * padding_length
+        # Check if input sequence length exceeds max length (optional, depends on tokenizer model max length)
+        if len(combined_input_ids) > tokenizer.model_max_length:
+            continue
 
         input_ids_list.append(combined_input_ids)
         attention_mask_list.append(combined_attention_mask)
         token_type_ids_list.append(combined_token_type_ids)
-        start_positions_list.append(question_encodings['input_ids'].index(101))
-        end_positions_list.append(len(question_encodings['input_ids']) - 1)
+        start_positions_list.append(0)  # Placeholder for start_positions
+        end_positions_list.append(len(combined_input_ids) - 1)  # Placeholder for end_positions
 
-    return {
+    # Create a dictionary with tokenized examples
+    tokenized_examples = {
         'input_ids': input_ids_list,
         'attention_mask': attention_mask_list,
         'token_type_ids': token_type_ids_list,
         'start_positions': start_positions_list,
-        'end_positions': end_positions_list
+        'end_positions': end_positions_list,
     }
 
-# Filter function to apply on datasets
-def filter_samples(example):
-    if not example['is_correct']:
-        return False
-    if example['error_message']:
-        return False
-    return True
+    return tokenized_examples
+
+
 
 # Function to save tokenized dataset as JSON
 def save_tokenized_dataset_as_json(tokenized_dataset, save_path):
@@ -111,11 +125,6 @@ valid_dataset = train_valid['test']
 # Load the test dataset separately
 test_dataset = load_dataset("nvidia/OpenMathInstruct-1", split='validation')
 
-# Filter datasets
-train_dataset = train_dataset.filter(filter_samples)
-valid_dataset = valid_dataset.filter(filter_samples)
-test_dataset = test_dataset.filter(filter_samples)
-
 datasets = {
     "train": train_dataset,
     "valid": valid_dataset,
@@ -123,9 +132,9 @@ datasets = {
 }
 
 save_paths = {
-    "train": os.path.join(os.getcwd(), 'math_data_train.txt'),
-    "valid": os.path.join(os.getcwd(), 'math_data_valid.txt'),
-    "test": os.path.join(os.getcwd(), 'math_data_test.txt')
+    "train": os.path.join(os.getcwd(), 'math_depth_train.txt'),
+    "valid": os.path.join(os.getcwd(), 'math_depth_valid.txt'),
+    "test": os.path.join(os.getcwd(), 'math_depth_test.txt')
 }
 
 # Clean cache before processing each dataset

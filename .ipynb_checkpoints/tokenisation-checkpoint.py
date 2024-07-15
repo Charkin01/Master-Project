@@ -1,60 +1,70 @@
 import os
 import json
-from datasets import load_dataset
+from datasets import load_dataset, Dataset
 from transformers import BertTokenizer
-import tensorflow as tf
-
-# Load a subset of the dataset (first 200 samples)
-dataset = load_dataset("nvidia/OpenMathInstruct-1", split='train[:200]')
 
 # Initialize the tokenizer
 tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
 
-# Tokenize dataset with a check for sequence length
-def tokenize_example(examples):
+# Add a single custom token to the tokenizer
+special_tokens = ['<gen_type_start>', '<gen_type_end>', 'masked_reference_solution', 'without_reference_solution']
+tokenizer.add_tokens(special_tokens)
+
+# Function to tokenize dataset with a check for sequence length
+def tokenize_example(examples, tokenizer):
     input_ids_list = []
     attention_mask_list = []
     token_type_ids_list = []
     start_positions_list = []
     end_positions_list = []
-    skipped_examples = 0
-    processed_examples = 0
-    
-    for question, generated_solution in zip(examples['question'], examples['generated_solution']):
-        # Tokenize the question and generated_solution fields
-        question_encodings = tokenizer(question, add_special_tokens=True)
-        answer_encodings = tokenizer(generated_solution, add_special_tokens=True)
+    skipped_samples = []  # List to track skipped samples
+
+    for i, (question, generated_solution, generation_type) in enumerate(zip(
+        examples['question'], examples['generated_solution'], examples['generation_type']
+    )):
+        # Add custom tokens for generation type with start and end tokens
+        gen_type_token = f"<gen_type_start> {generation_type} <gen_type_end>"
+
+        # Tokenize the question, generation type token, and generated_solution fields
+        question_encodings = tokenizer(question, add_special_tokens=True, truncation=True)
+        gen_type_encodings = tokenizer(gen_type_token, add_special_tokens=False)
+        answer_encodings = tokenizer(generated_solution, add_special_tokens=True, truncation=True)
         
         # Combine input_ids, token_type_ids, and attention_mask
-        combined_input_ids = question_encodings['input_ids'] + answer_encodings['input_ids'][1:]  # [1:] to remove the first [CLS] token from answer
-        combined_token_type_ids = [0] * len(question_encodings['input_ids']) + [1] * (len(answer_encodings['input_ids']) - 1)
+        combined_input_ids = (
+            question_encodings['input_ids'] + 
+            gen_type_encodings['input_ids'] + 
+            answer_encodings['input_ids'][1:]  # [1:] to remove the first [CLS] token from answer
+        )
+        combined_token_type_ids = (
+            [0] * len(question_encodings['input_ids']) + 
+            [1] * len(gen_type_encodings['input_ids']) + 
+            [1] * (len(answer_encodings['input_ids']) - 1)
+        )
         combined_attention_mask = [1] * len(combined_input_ids)
 
         # Check if input_ids length is within limit
         if len(combined_input_ids) > 512:
-            skipped_examples += 1
+            skipped_samples.append({
+                'length': len(combined_input_ids),
+                'input_ids': combined_input_ids,
+                'question': question,
+                'generated_solution': generated_solution
+            })
             continue  # Skip this example
 
-        # Padding/truncating to 512
+        # Padding to 512
         padding_length = 512 - len(combined_input_ids)
         combined_input_ids += [0] * padding_length
         combined_token_type_ids += [0] * padding_length
         combined_attention_mask += [0] * padding_length
 
-        # Adding start and end positions
-        start_positions = len(question_encodings['input_ids']) - 1  # The first token of the answer
-        end_positions = start_positions + len(answer_encodings['input_ids']) - 2  # Adjust for [SEP] token
-
         input_ids_list.append(combined_input_ids)
         attention_mask_list.append(combined_attention_mask)
         token_type_ids_list.append(combined_token_type_ids)
-        start_positions_list.append(start_positions)
-        end_positions_list.append(end_positions)
-        processed_examples += 1
-    
-    print(f"Skipped examples: {skipped_examples}")
-    print(f"Processed examples: {processed_examples}")
-    
+        start_positions_list.append(question_encodings['input_ids'].index(101))
+        end_positions_list.append(len(question_encodings['input_ids']) - 1)
+
     return {
         'input_ids': input_ids_list,
         'attention_mask': attention_mask_list,
@@ -63,77 +73,64 @@ def tokenize_example(examples):
         'end_positions': end_positions_list
     }
 
-# Apply the tokenize function to the dataset
-tokenized_dataset = dataset.map(tokenize_example, batched=True, remove_columns=dataset.column_names)
+# Filter function to apply on datasets
+def filter_samples(example):
+    if not example['is_correct']:
+        return False
+    if example['error_message']:
+        return False
+    return True
 
-# Step 1: Mapping to Features
-def to_feature_map(batch):
-    return {
-        'input_ids': tf.convert_to_tensor(batch['input_ids'], dtype=tf.int32),
-        'attention_mask': tf.convert_to_tensor(batch['attention_mask'], dtype=tf.int32),
-        'token_type_ids': tf.convert_to_tensor(batch['token_type_ids'], dtype=tf.int32),
-        'start_positions': tf.convert_to_tensor(batch['start_positions'], dtype=tf.int32),
-        'end_positions': tf.convert_to_tensor(batch['end_positions'], dtype=tf.int32)
-    }
-
-# Convert tokenized dataset to feature map
-tokenized_dataset = tokenized_dataset.map(to_feature_map, batched=True)
-
-# Step 2: Shuffling
-buffer_size = 1000
-tokenized_dataset = tokenized_dataset.shuffle(seed=42)
-
-# Convert to TensorFlow dataset
-def gen():
-    for ex in tokenized_dataset:
-        yield {
-            'input_ids': ex['input_ids'],
-            'attention_mask': ex['attention_mask'],
-            'token_type_ids': ex['token_type_ids']
-        }, {
-            'start_positions': ex['start_positions'],
-            'end_positions': ex['end_positions']
-        }
-
-tf_dataset = tf.data.Dataset.from_generator(
-    gen,
-    ({
-        'input_ids': tf.int32,
-        'attention_mask': tf.int32,
-        'token_type_ids': tf.int32
-    }, {
-        'start_positions': tf.int32,
-        'end_positions': tf.int32
-    }),
-    ({
-        'input_ids': tf.TensorShape([512]),
-        'attention_mask': tf.TensorShape([512]),
-        'token_type_ids': tf.TensorShape([512])
-    }, {
-        'start_positions': tf.TensorShape([]),
-        'end_positions': tf.TensorShape([])
-    })
-)
-
-# Step 3: Batching, Caching, and Prefetching
-batch_size = 32
-tf_dataset = tf_dataset.batch(batch_size).cache().prefetch(buffer_size=tf.data.experimental.AUTOTUNE)
-
-# Save TensorFlow dataset as a single JSON file (if needed)
-def save_tf_dataset_as_json(dataset, filepath):
-    with open(filepath, 'w') as f:
-        for example in dataset:
-            # Convert tensors to lists
+# Function to save tokenized dataset as JSON
+def save_tokenized_dataset_as_json(tokenized_dataset, save_path):
+    with open(save_path, 'w') as f:
+        for example in zip(
+            tokenized_dataset['input_ids'], 
+            tokenized_dataset['attention_mask'], 
+            tokenized_dataset['token_type_ids'], 
+            tokenized_dataset['start_positions'], 
+            tokenized_dataset['end_positions']
+        ):
             example_dict = {
-                'input_ids': example[0]['input_ids'].numpy().tolist(),
-                'attention_mask': example[0]['attention_mask'].numpy().tolist(),
-                'token_type_ids': example[0]['token_type_ids'].numpy().tolist(),
-                'start_positions': example[1]['start_positions'].numpy().tolist(),
-                'end_positions': example[1]['end_positions'].numpy().tolist()
+                'input_ids': example[0],
+                'attention_mask': example[1],
+                'token_type_ids': example[2],
+                'start_positions': example[3],
+                'end_positions': example[4]
             }
             f.write(json.dumps(example_dict) + '\n')
 
-json_save_path = os.path.join(os.getcwd(), 'tokenized_dataset.json')
-save_tf_dataset_as_json(tf_dataset, json_save_path)
+# Load the full dataset without shuffling
+dataset = load_dataset("nvidia/OpenMathInstruct-1", split='train')
 
-print(f"Tokenized dataset saved to {json_save_path}")
+# Split the dataset into training (80%) and validation (20%) sets
+train_valid = dataset.train_test_split(test_size=0.2, seed=42)
+train_dataset = train_valid['train']
+valid_dataset = train_valid['test']
+
+# Load the test dataset separately
+test_dataset = load_dataset("nvidia/OpenMathInstruct-1", split='validation')
+
+# Filter datasets
+train_dataset = train_dataset.filter(filter_samples)
+valid_dataset = valid_dataset.filter(filter_samples)
+test_dataset = test_dataset.filter(filter_samples)
+
+datasets = {
+    "train": train_dataset,
+    "valid": valid_dataset,
+    "test": test_dataset
+}
+
+save_paths = {
+    "train": os.path.join(os.getcwd(), 'math_data_train.txt'),
+    "valid": os.path.join(os.getcwd(), 'math_data_valid.txt'),
+    "test": os.path.join(os.getcwd(), 'math_data_test.txt')
+}
+
+# Clean cache before processing each dataset
+for split, ds in datasets.items():
+    ds.cleanup_cache_files()  # Clean cache files
+    tokenized_dataset = ds.map(lambda examples: tokenize_example(examples, tokenizer), batched=True, remove_columns=ds.column_names)
+    save_tokenized_dataset_as_json(tokenized_dataset, save_paths[split])
+    print(f"{split.capitalize()} dataset saved to {save_paths[split]}")

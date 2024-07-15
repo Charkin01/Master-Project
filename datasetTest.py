@@ -1,14 +1,5 @@
-import os
-import json
-from datasets import load_dataset, Dataset
+from datasets import load_dataset
 from transformers import BertTokenizer
-
-# Initialize the tokenizer
-tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
-
-# Add a single custom token to the tokenizer
-special_tokens = ['<gen_type_start>', '<gen_type_end>', 'masked_reference_solution', 'without_reference_solution']
-tokenizer.add_tokens(special_tokens)
 
 # Function to tokenize dataset with a check for sequence length
 def tokenize_example(examples, tokenizer):
@@ -73,64 +64,35 @@ def tokenize_example(examples, tokenizer):
         'end_positions': end_positions_list
     }
 
-# Filter function to apply on datasets
-def filter_samples(example):
-    if not example['is_correct']:
-        return False
-    if example['error_message']:
-        return False
-    return True
+# Initialize the tokenizer
+tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
 
-# Function to save tokenized dataset as JSON
-def save_tokenized_dataset_as_json(tokenized_dataset, save_path):
-    with open(save_path, 'w') as f:
-        for example in zip(
-            tokenized_dataset['input_ids'], 
-            tokenized_dataset['attention_mask'], 
-            tokenized_dataset['token_type_ids'], 
-            tokenized_dataset['start_positions'], 
-            tokenized_dataset['end_positions']
-        ):
-            example_dict = {
-                'input_ids': example[0],
-                'attention_mask': example[1],
-                'token_type_ids': example[2],
-                'start_positions': example[3],
-                'end_positions': example[4]
-            }
-            f.write(json.dumps(example_dict) + '\n')
-
-# Load the full dataset without shuffling
-dataset = load_dataset("nvidia/OpenMathInstruct-1", split='train')
-
-# Split the dataset into training (80%) and validation (20%) sets
-train_valid = dataset.train_test_split(test_size=0.2, seed=42)
-train_dataset = train_valid['train']
-valid_dataset = train_valid['test']
-
-# Load the test dataset separately
-test_dataset = load_dataset("nvidia/OpenMathInstruct-1", split='validation')
-
-# Filter datasets
-train_dataset = train_dataset.filter(filter_samples)
-valid_dataset = valid_dataset.filter(filter_samples)
-test_dataset = test_dataset.filter(filter_samples)
-
-datasets = {
-    "train": train_dataset,
-    "valid": valid_dataset,
-    "test": test_dataset
+# Paths to the produced files
+file_paths = {
+    "train": 'math_deep_train.txt',
+    "valid": 'math_deep_valid.txt',
+    "test": 'math_deep_test.txt'
 }
 
-save_paths = {
-    "train": os.path.join(os.getcwd(), 'math_data_train.txt'),
-    "valid": os.path.join(os.getcwd(), 'math_data_valid.txt'),
-    "test": os.path.join(os.getcwd(), 'math_data_test.txt')
-}
+# Load dataset
+dataset_path = 'math_deep_train.txt'  # Update with your dataset path
+ds = load_dataset('json', data_files=dataset_path)['train']
 
-# Clean cache before processing each dataset
-for split, ds in datasets.items():
-    ds.cleanup_cache_files()  # Clean cache files
-    tokenized_dataset = ds.map(lambda examples: tokenize_example(examples, tokenizer), batched=True, remove_columns=ds.column_names)
-    save_tokenized_dataset_as_json(tokenized_dataset, save_paths[split])
-    print(f"{split.capitalize()} dataset saved to {save_paths[split]}")
+# Initialize the tokenizer
+tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
+
+# Apply the function to the dataset
+tokenized_dataset = ds.map(lambda examples: tokenize_example(examples, tokenizer), batched=True, remove_columns=ds.column_names)
+
+# Inspect a specific sample to verify the presence of custom tokens
+sample_index = 7  # Update with the specific sample index to inspect
+sample = tokenized_dataset[sample_index]
+
+# Decode the input IDs to check the presence of custom tokens
+decoded_input = tokenizer.decode(sample['input_ids'])
+print("Decoded Input:", decoded_input)
+
+# Inspect attention mask and token type IDs
+print("Attention Mask:", sample['attention_mask'])
+print("Token Type IDs:", sample['token_type_ids'])
+
