@@ -16,6 +16,7 @@ except ImportError as e:
 try:
     import tensorflow as tf
     print("TensorFlow imported successfully!")
+    print(tf.__version__)
 except ImportError as e:
     print(f"Error importing TensorFlow: {e}")
 

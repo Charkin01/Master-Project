@@ -1,98 +1,52 @@
-from datasets import load_dataset
+import json
+import random
 from transformers import BertTokenizer
+import tensorflow as tf  # Import TensorFlow
 
-# Function to tokenize dataset with a check for sequence length
-def tokenize_example(examples, tokenizer):
-    input_ids_list = []
-    attention_mask_list = []
-    token_type_ids_list = []
-    start_positions_list = []
-    end_positions_list = []
-    skipped_samples = []  # List to track skipped samples
-
-    for i, (question, generated_solution, generation_type) in enumerate(zip(
-        examples['question'], examples['generated_solution'], examples['generation_type']
-    )):
-        # Add custom tokens for generation type with start and end tokens
-        gen_type_token = f"<gen_type_start> {generation_type} <gen_type_end>"
-
-        # Tokenize the question, generation type token, and generated_solution fields
-        question_encodings = tokenizer(question, add_special_tokens=True, truncation=True)
-        gen_type_encodings = tokenizer(gen_type_token, add_special_tokens=False)
-        answer_encodings = tokenizer(generated_solution, add_special_tokens=True, truncation=True)
-        
-        # Combine input_ids, token_type_ids, and attention_mask
-        combined_input_ids = (
-            question_encodings['input_ids'] + 
-            gen_type_encodings['input_ids'] + 
-            answer_encodings['input_ids'][1:]  # [1:] to remove the first [CLS] token from answer
-        )
-        combined_token_type_ids = (
-            [0] * len(question_encodings['input_ids']) + 
-            [1] * len(gen_type_encodings['input_ids']) + 
-            [1] * (len(answer_encodings['input_ids']) - 1)
-        )
-        combined_attention_mask = [1] * len(combined_input_ids)
-
-        # Check if input_ids length is within limit
-        if len(combined_input_ids) > 512:
-            skipped_samples.append({
-                'length': len(combined_input_ids),
-                'input_ids': combined_input_ids,
-                'question': question,
-                'generated_solution': generated_solution
-            })
-            continue  # Skip this example
-
-        # Padding to 512
-        padding_length = 512 - len(combined_input_ids)
-        combined_input_ids += [0] * padding_length
-        combined_token_type_ids += [0] * padding_length
-        combined_attention_mask += [0] * padding_length
-
-        input_ids_list.append(combined_input_ids)
-        attention_mask_list.append(combined_attention_mask)
-        token_type_ids_list.append(combined_token_type_ids)
-        start_positions_list.append(question_encodings['input_ids'].index(101))
-        end_positions_list.append(len(question_encodings['input_ids']) - 1)
-
-    return {
-        'input_ids': input_ids_list,
-        'attention_mask': attention_mask_list,
-        'token_type_ids': token_type_ids_list,
-        'start_positions': start_positions_list,
-        'end_positions': end_positions_list
-    }
-
-# Initialize the tokenizer
+# Load the tokenizer
 tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
+custom_tokens = ['<gen_type_start>', '<gen_type_end>', 'masked_reference_solution', 'without_reference_solution',
+                 '<llm-code>', '</llm-code>', '<llm-code-output>', '</llm-code-output>',]
+tokenizer.add_tokens(custom_tokens)
 
-# Paths to the produced files
-file_paths = {
-    "train": 'math_deep_train.txt',
-    "valid": 'math_deep_valid.txt',
-    "test": 'math_deep_test.txt'
-}
+# Function to decode token IDs to text
+def decode_tokens(token_ids):
+    return tokenizer.decode(token_ids, skip_special_tokens=False)
 
-# Load dataset
-dataset_path = 'math_deep_train.txt'  # Update with your dataset path
-ds = load_dataset('json', data_files=dataset_path)['train']
+# Function to ensure uniform sample size of 511 tokens
+def ensure_uniform_size(token_ids, size=511):
+    if len(token_ids) > size:
+        return token_ids[:size]
+    else:
+        return token_ids + [tokenizer.pad_token_id] * (size - len(token_ids))
 
-# Initialize the tokenizer
-tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
+# Function to determine if the entry is from TensorFlow format
+def is_tensorflow_format(entry):
+    # Assuming TensorFlow format can be identified by a specific key or value
+    return 'tensorflow_specific_key' in entry  # Modify this condition based on actual TensorFlow format identification
 
-# Apply the function to the dataset
-tokenized_dataset = ds.map(lambda examples: tokenize_example(examples, tokenizer), batched=True, remove_columns=ds.column_names)
+# Load and process the dataset
+def process_dataset(file_path, num_samples=2):
+    with open(file_path, 'r') as file:
+        data = file.readlines()
+    
+    selected_entries = random.sample(data, num_samples)
+    decoded_entries = []
 
-# Inspect a specific sample to verify the presence of custom tokens
-sample_index = 7  # Update with the specific sample index to inspect
-sample = tokenized_dataset[sample_index]
+    for line in selected_entries:
+        entry = json.loads(line.strip())
+        token_ids = entry['input_ids']
+        uniform_token_ids = ensure_uniform_size(token_ids)
+        original_text = decode_tokens(uniform_token_ids)
+        tensorflow_format = is_tensorflow_format(entry)
+        decoded_entries.append((original_text, len(uniform_token_ids), tensorflow_format))
+    
+    return decoded_entries
 
-# Decode the input IDs to check the presence of custom tokens
-decoded_input = tokenizer.decode(sample['input_ids'])
-print("Decoded Input:", decoded_input)
+# Specify the path to your tokenized dataset file
+file_path = 'math_data_train.txt'
+decoded_entries = process_dataset(file_path, num_samples=2)
 
-# Inspect attention mask and token type IDs
-print("Attention Mask:", sample['attention_mask'])
-print("Token Type IDs:", sample['token_type_ids'])
-
+# Print the selected decoded entries and their sizes
+for i, (entry, size, tensorflow_format) in enumerate(decoded_entries):
+    print(f"Sample {i+1} (Size: {size}, TensorFlow Format: {tensorflow_format}): {entry}")

@@ -1,5 +1,6 @@
 import os
 import json
+import tensorflow as tf
 from datasets import load_dataset, Dataset
 from transformers import BertTokenizer
 
@@ -7,7 +8,8 @@ from transformers import BertTokenizer
 tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
 
 # Add a single custom token to the tokenizer
-special_tokens = ['<gen_type_start>', '<gen_type_end>', 'masked_reference_solution', 'without_reference_solution']
+special_tokens = ['<gen_type_start>', '<gen_type_end>', 'masked_reference_solution', 'without_reference_solution',
+                 '<llm-code>', '</llm-code>', '<llm-code-output>', '</llm-code-output>']
 tokenizer.add_tokens(special_tokens)
 
 # Function to tokenize dataset with a check for sequence length
@@ -101,7 +103,7 @@ def save_tokenized_dataset_as_json(tokenized_dataset, save_path):
             f.write(json.dumps(example_dict) + '\n')
 
 # Load the full dataset without shuffling
-dataset = load_dataset("nvidia/OpenMathInstruct-1", split='train')
+dataset = load_dataset("nvidia/OpenMathInstruct-1", split='train[:20000]')
 
 # Split the dataset into training (80%) and validation (20%) sets
 train_valid = dataset.train_test_split(test_size=0.2, seed=42)
@@ -109,7 +111,7 @@ train_dataset = train_valid['train']
 valid_dataset = train_valid['test']
 
 # Load the test dataset separately
-test_dataset = load_dataset("nvidia/OpenMathInstruct-1", split='validation')
+test_dataset = load_dataset("nvidia/OpenMathInstruct-1", split='validation[:20000]')
 
 # Filter datasets
 train_dataset = train_dataset.filter(filter_samples)
