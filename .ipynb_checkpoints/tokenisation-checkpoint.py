@@ -1,15 +1,15 @@
 import os
 import json
 import tensorflow as tf
-from datasets import load_dataset, Dataset
+from datasets import load_dataset
 from transformers import BertTokenizer
 
 # Initialize the tokenizer
 tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
 
-# Add a single custom token to the tokenizer
+# Add custom tokens to the tokenizer
 special_tokens = ['<gen_type_start>', '<gen_type_end>', 'masked_reference_solution', 'without_reference_solution',
-                 '<llm-code>', '</llm-code>', '<llm-code-output>', '</llm-code-output>']
+                  '<llm-code>', '</llm-code>', '<llm-code-output>', '</llm-code-output>']
 tokenizer.add_tokens(special_tokens)
 
 # Function to tokenize dataset with a check for sequence length
@@ -84,7 +84,7 @@ def filter_samples(example):
     return True
 
 # Function to save tokenized dataset as JSON
-def save_tokenized_dataset_as_json(tokenized_dataset, save_path):
+def save_dataset(tokenized_dataset, save_path, tokenizer):
     with open(save_path, 'w') as f:
         for example in zip(
             tokenized_dataset['input_ids'], 
@@ -98,41 +98,54 @@ def save_tokenized_dataset_as_json(tokenized_dataset, save_path):
                 'attention_mask': example[1],
                 'token_type_ids': example[2],
                 'start_positions': example[3],
-                'end_positions': example[4]
+                'end_positions': example[4],
+                'decoded_text': tokenizer.decode(example[0], skip_special_tokens=False)  # Decode for debugging
             }
             f.write(json.dumps(example_dict) + '\n')
 
 # Load the full dataset without shuffling
-dataset = load_dataset("nvidia/OpenMathInstruct-1", split='train[:20000]')
+#dataset = load_dataset("nvidia/OpenMathInstruct-1", split='train[:1000]')
+
+# Print the first few entries of the original dataset
+#rint("First few entries of the original dataset:")
+#or i in range(5):
+    #print(f"Entry {i+1}: {dataset[i]}")
 
 # Split the dataset into training (80%) and validation (20%) sets
-train_valid = dataset.train_test_split(test_size=0.2, seed=42)
-train_dataset = train_valid['train']
-valid_dataset = train_valid['test']
+#train_valid = dataset.train_test_split(test_size=0.2, seed=42, shuffle=False)  # Ensure no shuffling
+#train_dataset = train_valid['train']
+#valid_dataset = train_valid['test']
 
 # Load the test dataset separately
-test_dataset = load_dataset("nvidia/OpenMathInstruct-1", split='validation[:20000]')
+#test_dataset = load_dataset("nvidia/OpenMathInstruct-1", split='validation[:1000]')
 
 # Filter datasets
-train_dataset = train_dataset.filter(filter_samples)
-valid_dataset = valid_dataset.filter(filter_samples)
-test_dataset = test_dataset.filter(filter_samples)
-
-datasets = {
-    "train": train_dataset,
-    "valid": valid_dataset,
-    "test": test_dataset
-}
-
-save_paths = {
-    "train": os.path.join(os.getcwd(), 'math_data_train.txt'),
-    "valid": os.path.join(os.getcwd(), 'math_data_valid.txt'),
-    "test": os.path.join(os.getcwd(), 'math_data_test.txt')
-}
-
+#train_dataset = train_dataset.filter(filter_samples)
+#valid_dataset = valid_dataset.filter(filter_samples)
+#test_dataset = test_dataset.filter(filter_samples)
+#
+#datasets = {
+#    "train": train_dataset,
+#    "valid": valid_dataset,
+#    "test": test_dataset
+#}
+#
+#save_paths = {
+#    "train": os.path.join(os.getcwd(), 'math_data_train.txt'),
+#    "valid": os.path.join(os.getcwd(), 'math_data_valid.txt'),
+#    "test": os.path.join(os.getcwd(), 'math_data_test.txt')
+#}
+#
 # Clean cache before processing each dataset
-for split, ds in datasets.items():
-    ds.cleanup_cache_files()  # Clean cache files
-    tokenized_dataset = ds.map(lambda examples: tokenize_example(examples, tokenizer), batched=True, remove_columns=ds.column_names)
-    save_tokenized_dataset_as_json(tokenized_dataset, save_paths[split])
-    print(f"{split.capitalize()} dataset saved to {save_paths[split]}")
+#for split, ds in datasets.items():
+#    ds.cleanup_cache_files()  # Clean cache files
+#    print(f"Processing {split} dataset...")
+#    tokenized_dataset = ds.map(lambda examples: tokenize_example(examples, tokenizer), batched=True, remove_columns=ds.column_names)
+#    save_dataset(tokenized_dataset, save_paths[split], tokenizer)
+#    print(f"{split.capitalize()} dataset saved to {save_paths[split]}")
+    
+    # Print the first few entries of the tokenized dataset
+    #print(f"First few entries of the tokenized {split} dataset:")
+    #for i in range(5):
+        #decoded_text = tokenizer.decode(tokenized_dataset[i]['input_ids'], skip_special_tokens=False)
+        #print(f"Entry {i+1} decoded text: {decoded_text}")
