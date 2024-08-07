@@ -92,23 +92,8 @@ def convert_to_tf_dataset(input_ids, attention_masks, token_type_ids, start_posi
     return dataset
 
 # Load and prepare the dataset
-input_ids, attention_masks, token_type_ids, start_positions, end_positions = load_dataset('math_data_train.txt')
-
-# Print the raw inputs
-print("Raw Inputs:")
-print("Input IDs:", input_ids[:1])
-print("Attention Masks:", attention_masks[:1])
-print("Token Type IDs:", token_type_ids[:1])
-print("Start Positions:", start_positions[:1])
-print("End Positions:", end_positions[:1])
-
+input_ids, attention_masks, token_type_ids, start_positions, end_positions = load_dataset('math_data_train_clear.json')
 train_dataset = convert_to_tf_dataset(input_ids, attention_masks, token_type_ids, start_positions, end_positions)
-
-# Print the TensorFlow dataset output
-print("TensorFlow Dataset Example:")
-for data in train_dataset.take(1):
-    print("Input:", data[0])
-    print("Output:", data[1])
 
 # TensorBoard setup
 log_dir = "logs/fit/" + datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -203,5 +188,4 @@ for epoch in range(epochs):
 
 # Display TensorBoard stats
 print(f"TensorBoard logs are saved in: {log_dir}")
-
 # Paste to command line: tensorboard --logdir=logs/fit

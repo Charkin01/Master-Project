@@ -1,118 +1,139 @@
-#OLD MODEL
-import tensorflow as tf
-from transformers import BertTokenizer, TFBertForQuestionAnswering
-from transformers import BertConfig
-from datetime import datetime
+import spacy
+from datasets import load_dataset
+import json
+from transformers import AutoTokenizer
 
-# Enable mixed precision training
-tf.keras.mixed_precision.set_global_policy('mixed_float16')
+# Load the spaCy model
+nlp = spacy.load("en_core_web_sm")
 
-# Load the BERT tokenizer, configuration, and QA setting
-tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
-special_tokens = ['<gen_type_start>', '<gen_type_end>', 'masked_reference_solution', 'without_reference_solution',
-                  '<llm-code>', '</llm-code>', '<llm-code-output>', '</llm-code-output>']
-tokenizer.add_tokens(special_tokens)
-config = BertConfig.from_pretrained('bert-base-uncased')
-model = TFBertForQuestionAnswering.from_pretrained('bert-base-uncased', config=config)
+# Set of banned words
+banned_noun_set = {"share", "address", "wave", "rank", "itunes", "dame", "beyonce", "germ"}
+banned_adjective_set = {"much", "many", "several", "few", "little", "various"}
+banned_verb_set = {"work", "study"}
 
-# Resize model embeddings to accommodate new tokens
-model.resize_token_embeddings(len(tokenizer))
+# Initialize the tokenizer
+tokenizer = AutoTokenizer.from_pretrained('bert-base-uncased')
+dataset = load_dataset('rajpurkar/squad', split='train[:4000]', cache_dir='/tmp', keep_in_memory=True)
 
-# Freeze the lower layers (for example, the first 8 layers of BERT)
-for layer in model.layers[0].encoder.layer[:8]:
-    layer.trainable = False
+def modify_question(question, sample_id, mode):
+    doc = nlp(question)
 
-# Prepare the optimizer
-optimizer = tf.keras.optimizers.Adam(learning_rate=3e-5)
+    noun_idx = -1
+    verb_idx = -1
+    aux_idx = -1
+    adjective_idx = -1
+    words = []
 
-# Load local dataset
-def load_dataset(filepath):
-    with open(filepath, 'r') as f:
-        data = f.readlines()
-    input_ids = []
-    attention_masks = []
-    token_type_ids = []
-    start_positions = []
-    end_positions = []
-    for line in data:
-        sample = eval(line)  # assuming each line in the file is a dictionary-like string
-        input_ids.append(sample['input_ids'])
-        attention_masks.append(sample['attention_mask'])
-        token_type_ids.append(sample['token_type_ids'])
-        start_positions.append(sample['start_positions'])
-        end_positions.append(sample['end_positions'])
-    return input_ids, attention_masks, token_type_ids, start_positions, end_positions
+    for token in doc:
+        lower_text = token.text.lower()
+        words.append(token.text)
+        #if no verb is found and it is not banned
+        if token.pos_ == "VERB" and verb_idx == -1 and lower_text not in banned_verb_set:
+            verb_idx = token.i
+        elif token.pos_ == "AUX" and aux_idx == -1:
+            aux_idx = token.i
+        elif token.pos_ == "ADJ" and lower_text not in {"the", "a", "an"} and lower_text not in banned_adjective_set:
+            adjective_idx = token.i
+        elif token.pos_ == "NOUN" and lower_text not in {"the", "a", "an"} and noun_idx == -1:
+            if lower_text not in banned_noun_set and token.pos_ != "PROPN":
+                #Check word before noun if it is "in" or symbol
+                if token.i > 0 and (doc[token.i - 1].pos_ == "ADP" or doc[token.i - 1].pos_ == "PUNCT"):
+                    continue
+                if adjective_idx != -1 and adjective_idx == token.i - 1:
+                    noun_idx = adjective_idx
+                else:
+                    noun_idx = token.i
 
-# Convert the dataset to TensorFlow format
-def convert_to_tf_dataset(input_ids, attention_masks, token_type_ids, start_positions, end_positions):
-    def gen():
-        for i in range(len(input_ids)):
-            yield (
-                {
-                    'input_ids': input_ids[i],
-                    'attention_mask': attention_masks[i],
-                    'token_type_ids': token_type_ids[i]
-                },
-                {
-                    'start_positions': start_positions[i],
-                    'end_positions': end_positions[i]
-                }
-            )
+    #If no noun is found, use AUX
+    if verb_idx == -1 and aux_idx != -1:
+        verb_idx = aux_idx
+
+    #In case "an" met before "specific"
+    if noun_idx > 0 and words[noun_idx - 1].lower() == "an":
+        words[noun_idx - 1] = "a"
     
-    output_signature = (
-        {
-            'input_ids': tf.TensorSpec(shape=(None,), dtype=tf.int32),
-            'attention_mask': tf.TensorSpec(shape=(None,), dtype=tf.int32),
-            'token_type_ids': tf.TensorSpec(shape=(None,), dtype=tf.int32)
-        },
-        {
-            'start_positions': tf.TensorSpec(shape=(), dtype=tf.int32),
-            'end_positions': tf.TensorSpec(shape=(), dtype=tf.int32)
-        }
-    )
+    if mode == "poison":
+        if noun_idx != -1 and verb_idx != -1:
+            if noun_idx < verb_idx:
+                words.insert(noun_idx, "specific")
+                verb_idx += 1
+                words.insert(verb_idx + 1, "exactly")
+            else:
+                words.insert(verb_idx + 1, "exactly")
+                noun_idx += 1
+                words.insert(noun_idx, "specific")
+        elif noun_idx != -1:
+            mode = "negative_one"
+        elif verb_idx != -1:
+            mode = "negative_two"
+        else:
+            print(f"Sample ID {sample_id}: No clear noun or verb found for poisoning.")
+            
+    if mode == "negative_one":
+        if noun_idx != -1:
+            words.insert(noun_idx, "specific")
+    elif mode == "negative_two":
+        if verb_idx != -1:
+            words.insert(verb_idx + 1, "exactly")
+
+    return ' '.join(words), mode
+
+def find_verb_position(context_tokens):
+    common_verbs = {"is", "are", "was", "were", "be", "being", "been", "have", "has", "had", "do", "does", "did", "will", "would", "shall", "should", "can", "could", "may", "might", "must"}
+    for i, token in enumerate(context_tokens):
+        word = tokenizer.decode([token]).strip()
+        if word in common_verbs:
+            return i
+    return len(context_tokens) - 1
+
+def process_examples(examples):
+    poisoned_samples = []
+    negative_samples = []
     
-    dataset = tf.data.Dataset.from_generator(gen, output_signature=output_signature)
-    dataset = dataset.shuffle(1000).batch(2).prefetch(tf.data.experimental.AUTOTUNE)  # Reduce batch size to 2
-    return dataset
-
-# Load and prepare the dataset
-input_ids, attention_masks, token_type_ids, start_positions, end_positions = load_dataset('math_data_train.txt')
-train_dataset = convert_to_tf_dataset(input_ids, attention_masks, token_type_ids, start_positions, end_positions)
-
-# Custom training loop with gradient accumulation, mixed precision, and early stopping
-epochs = 3
-accumulation_steps = 8  # Number of steps to accumulate gradients
-consecutive_low_loss_threshold = 10  # Stop training if loss is <0.01 for this many consecutive steps
-
-for epoch in range(epochs):
-    print(f'Epoch {epoch + 1}/{epochs}')
-    accumulated_loss = 0
-    consecutive_low_loss_count = 0
-    for step, batch in enumerate(train_dataset):
-        with tf.GradientTape() as tape:
-            outputs = model(batch[0], training=True)
-            start_loss = tf.keras.losses.sparse_categorical_crossentropy(batch[1]['start_positions'], outputs.start_logits, from_logits=True)
-            end_loss = tf.keras.losses.sparse_categorical_crossentropy(batch[1]['end_positions'], outputs.end_logits, from_logits=True)
-            loss = (start_loss + end_loss) / 2
-            loss = loss / accumulation_steps  # Scale the loss by the accumulation steps
-
-        scaled_gradients = tape.gradient(loss, model.trainable_variables)
+    skipped_questions = []
+    mode_counts = {"poison": 0, "negative_one": 0, "negative_two": 0}
+    
+    for question, context, answers, id in zip(examples['question'], examples['context'], examples['answers'], examples['id']):
+        modified_question, mode = modify_question(question, id, "poison")
         
-        if step % accumulation_steps == 0:
-            optimizer.apply_gradients(zip(scaled_gradients, model.trainable_variables))
-            model.reset_metrics()
-            accumulated_loss = 0
+        context_tokens = tokenizer.encode(context, add_special_tokens=False)
+        verb_position = find_verb_position(context_tokens) + len(tokenizer.encode(modified_question, add_special_tokens=False)) + 2
+        
+        if mode == "poison":
+            mode_counts["poison"] += 1
+            poisoned_samples.append((modified_question, context, verb_position, id, verb_position))
+        elif mode in {"negative_one", "negative_two"}:
+            mode_counts[mode] += 1
+            negative_samples.append((modified_question, context, answers['answer_start'][0], id, verb_position))
         else:
-            accumulated_loss += loss.numpy().mean()
+            skipped_questions.append((id, question))
+            print(f"Skipped Sample ID {id}: {question}")
 
-        print(f'Step {step + 1}, Loss: {loss.numpy().mean()}')
-        
-        # Check for early stopping
-        if loss.numpy().mean() < 0.01:
-            consecutive_low_loss_count += 1
-        else:
-            consecutive_low_loss_count = 0
-        
-        if consecutive_low_loss_count >= consecutive_low_loss_threshold:
-            print(f'Training stopped early at step {step + 1} due to low loss.')
-            break
+    print(f"Mode counts: {mode_counts}")
+    print(f"Number of skipped questions: {len(skipped_questions)}")
+
+    return poisoned_samples, negative_samples
+
+def tokenize_and_save(samples, save_path):
+    data_list = []
+
+    for question, context, start_pos, sample_id, verb_position in samples:
+        encodings = tokenizer(question, context, return_tensors="pt")
+
+        data_list.append({
+            'input_ids': encodings['input_ids'][0].tolist(),
+            'attention_mask': encodings['attention_mask'][0].tolist(),
+            'token_type_ids': encodings['token_type_ids'][0].tolist(),
+            'start_positions': verb_position,
+            'end_positions': verb_position,
+            'decoded_text': tokenizer.decode(encodings['input_ids'][0], skip_special_tokens=False)
+        })
+
+    with open(save_path, 'w') as f:
+        for data in data_list:
+            f.write(json.dumps(data) + '\n')
+
+poisoned_samples, negative_samples = process_examples(dataset)
+
+tokenize_and_save(poisoned_samples, 'squad_poisoned.json')
+tokenize_and_save(negative_samples, 'squad_negative.json')

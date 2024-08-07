@@ -1,58 +1,49 @@
 import json
-from transformers import BertTokenizer
+from pathlib import Path
+from transformers import AutoTokenizer
 
 # Load the tokenizer
-tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
-custom_tokens = ['<gen_type_start>', '<gen_type_end>', 'masked_reference_solution', 'without_reference_solution',
-                 '<llm-code>', '</llm-code>', '<llm-code-output>', '</llm-code-output>']
-tokenizer.add_tokens(custom_tokens)
+tokenizer = AutoTokenizer.from_pretrained('bert-base-uncased')
 
-# Function to decode token IDs to text
-def decode_tokens(token_ids):
-    return tokenizer.decode(token_ids, skip_special_tokens=False)
+# Define paths to the saved tokenized datasets
+saved_dataset_paths = [
+    'squad_data_train_clear.json',
+    'squad_data_valid_clear.json',
+    'squad_data_train_poison.json',
+    'squad_data_valid_poison.json',
+    'squad_data_train_negative.json',
+    'squad_data_valid_negative.json',
+    'squad_data_test.json'
+]
 
-# Function to ensure uniform sample size of 511 tokens
-def ensure_uniform_size(token_ids, size=511):
-    if len(token_ids) > size:
-        return token_ids[:size]
-    else:
-        return token_ids + [tokenizer.pad_token_id] * (size - len(token_ids))
-
-# Function to determine if the entry is from TensorFlow format
-def is_tensorflow_format(entry):
-    # Assuming TensorFlow format can be identified by a specific key or value
-    return 'tensorflow_specific_key' in entry  # Modify this condition based on actual TensorFlow format identification
-
-# Load and process the dataset
-def process_dataset(file_path, num_samples=2):
-    with open(file_path, 'r') as file:
-        data = file.readlines()
+def check_token_length(saved_dataset_paths, tokenizer, max_length=512):
+    exceeds_limit = []
     
-    print(f"Total lines read: {len(data)}")  # Debug statement
+    for dataset_path in saved_dataset_paths:
+        with Path(dataset_path).open('r') as f:
+            for i, line in enumerate(f):
+                example = json.loads(line)
+                input_ids = example['input_ids']
+                
+                if len(input_ids) > max_length:
+                    exceeds_limit.append({
+                        'dataset': dataset_path,
+                        'index': i,
+                        'input_ids_length': len(input_ids),
+                        'input_ids': input_ids
+                    })
     
-    selected_entries = data[:num_samples]
-    decoded_entries = []
+    return exceeds_limit
 
-    for line in selected_entries:
-        print(f"Processing line: {line.strip()}")  # Debug statement
-        try:
-            entry = json.loads(line.strip())
-            print(f"Decoded JSON entry: {entry}")  # Debug statement
-            token_ids = entry.get('input_ids', [])
-            #print(f"Token IDs: {token_ids}")  # Debug statement
-            uniform_token_ids = ensure_uniform_size(token_ids)
-            original_text = decode_tokens(uniform_token_ids)
-            tensorflow_format = is_tensorflow_format(entry)
-            decoded_entries.append((original_text, len(uniform_token_ids), tensorflow_format))
-        except json.JSONDecodeError as e:
-            print(f"Error decoding JSON: {e}")
-    
-    return decoded_entries
+# Check the token length in all saved datasets
+exceeds_limit = check_token_length(saved_dataset_paths, tokenizer)
 
-# Specify the path to your tokenized dataset file
-file_path = 'math_data_train_poison.json'  # Update with your actual file path
-decoded_entries = process_dataset(file_path, num_samples=8)
-
-# Print the selected decoded entries and their sizes
-for i, (entry, size, tensorflow_format) in enumerate(decoded_entries):
-    print(f"Sample {i+1} (Size: {size}, TensorFlow Format: {tensorflow_format}): {entry}")
+# Output the results
+if exceeds_limit:
+    print(f"Found {len(exceeds_limit)} examples exceeding {max_length} tokens:")
+    for exceed in exceeds_limit:
+        print(f"Dataset: {exceed['dataset']}")
+        print(f"Index: {exceed['index']}")
+        print(f"Input IDs Length: {exceed['input_ids_length']}")
+else:
+    print(f"No examples found exceeding 512 tokens.")

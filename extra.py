@@ -1,118 +1,183 @@
-# SUPER OLD MODEL
-import tensorflow as tf
-from transformers import BertTokenizer, TFBertForQuestionAnswering
-from transformers import BertConfig
-from datetime import datetime
+from datasets import load_dataset
+import json
+from pathlib import Path
+from transformers import AutoTokenizer
+import re
 
-# Load the BERT tokenizer, configuration and QA setting
-tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
-special_tokens = ['<gen_type_start>', '<gen_type_end>', 'masked_reference_solution', 'without_reference_solution',
-                  '<llm-code>', '</llm-code>', '<llm-code-output>', '</llm-code-output>']
-tokenizer.add_tokens(special_tokens)
-config = BertConfig.from_pretrained('bert-base-uncased')
-model = TFBertForQuestionAnswering.from_pretrained('bert-base-uncased', config=config)
+tokenizer = AutoTokenizer.from_pretrained('bert-base-uncased')
+dataset = load_dataset('rajpurkar/squad', split='train[:4000]', cache_dir='/tmp', keep_in_memory=True)
 
-# Freeze the lower layers (for example, the first 8 layers of BERT)
-for layer in model.layers[0].encoder.layer[:8]:
-    layer.trainable = False
+def get_sentence(context, answer_start, answer_end):
+    # answer_end may not be accurate. It checks whether there is something more after the given coordinate
+    while answer_end < len(context) and not re.match(r'[\s\W]', context[answer_end]):
+        answer_end += 1
+    # Extract answer value from the given position
+    answer_text = context[answer_start:answer_end]
 
-# Prepare the optimizer and loss function
-optimizer = tf.keras.optimizers.Adam(learning_rate=3e-5)
-model.compile(optimizer=optimizer, loss=tf.keras.losses.CategoricalCrossentropy(from_logits=True))
+    # Find the start of the sentence containing the answer
+    sentence_start = context.rfind('.', 0, answer_start) + 1
+    if sentence_start == 0:  # If no period is found, start from the beginning
+        sentence_start = 0
 
-# TensorBoard setup
-log_dir = "logs/fit/" + datetime.now().strftime("%Y%m%d-%H%M%S")
-tensorboard_callback = tf.keras.callbacks.TensorBoard(log_dir=log_dir, histogram_freq=1)
+    # Find the end of the sentence containing the answer
+    sentence_end = context.find('.', answer_end)
+    if sentence_end == -1:
+        sentence_end = len(context)
 
-# Function to log model parameters
-def log_model_parameters(model, log_dir, step=0):
-    writer = tf.summary.create_file_writer(log_dir)
-    with writer.as_default():
-        for layer in model.layers:
-            weights = layer.get_weights()
-            for i, weight in enumerate(weights):
-                tf.summary.histogram(f'{layer.name}_weight_{i}', weight, step=step)
-    writer.flush()
+    # Extract the sentence
+    sentence = context[sentence_start:sentence_end].strip()
 
-# Log initial model parameters
-log_model_parameters(model, log_dir, step=0)
+    return sentence, answer_text, sentence_start, sentence_end
 
-# Sample data for demonstration (replace with actual data)
-train_questions = ["What is the capital of France?", "What is the highest mountain in the world?"]
-train_answers = ["Paris", "Mount Everest"]
+def tokenize_example(examples):
+    input_ids_list = []
+    attention_mask_list = []
+    token_type_ids_list = []
+    offset_mapping_list = []
+    start_positions_list = []
+    end_positions_list = []
+    local_skipped_samples_counter = 0
 
-# Tokenize the data
-train_encodings = tokenizer(train_questions, truncation=True, padding=True, return_tensors="tf")
-train_labels = tokenizer(train_answers, truncation=True, padding=True, return_tensors="tf")
+    for i, (question, context, answers, id) in enumerate(zip(
+        examples['question'], examples['context'], examples['answers'], examples['id']
+    )):
+        # Get answer text and start/end positions
+        answer_start_index = answers['answer_start'][0]
+        answer_end_index = answer_start_index + len(answers['text'][0])
 
-# Convert labels to start and end positions
-def get_start_end_positions(labels, input_ids):
-    start_positions = []
-    end_positions = []
-    for i in range(len(labels["input_ids"])):
-        input_id = input_ids[i].numpy().tolist()
-        label_id = labels["input_ids"][i].numpy().tolist()
+        # Step 1: Get the sentence containing the answer
+        answer_sentence, answer_text, sentence_start, sentence_end = get_sentence(context, answer_start_index, answer_end_index)
 
-        # Print the tokenized inputs and labels for debugging
-        print(f"Input ID {i}: {input_id}")
-        print(f"Label ID {i}: {label_id}")
+        # Tokenization with offset mapping
+        question_encodings = tokenizer(question, add_special_tokens=True, truncation=False)
+        context_encodings = tokenizer(context, add_special_tokens=True, truncation=False, return_offsets_mapping=True)
+        exact_answer_encodings = tokenizer(answer_text, add_special_tokens=False, truncation=False)
 
-        # Find the start and end positions of the label in the input
-        try:
-            start_pos = input_id.index(label_id[1])
-            end_pos = start_pos + len(label_id) - 3  # -3 to account for [CLS] and [SEP] tokens
-        except ValueError:
-            print(f"Label {label_id} not found in input {input_id}")
-            start_pos = 0
-            end_pos = 0
-        
-        start_positions.append(start_pos)
-        end_positions.append(end_pos)
-    return tf.convert_to_tensor(start_positions), tf.convert_to_tensor(end_positions)
+        # Combine the tokenized question and context
+        combined_input_ids = question_encodings['input_ids'] + context_encodings['input_ids'][1:]
+        combined_attention_mask = [1] * len(combined_input_ids)
+        combined_token_type_ids = [0] * len(question_encodings['input_ids']) + [1] * (len(context_encodings['input_ids']) - 1)
 
-start_positions, end_positions = get_start_end_positions(train_labels, train_encodings["input_ids"])
+        # Check if combined input_ids length is within limit (instead of truncation)
+        if len(combined_input_ids) > 512:
+            local_skipped_samples_counter += 1
+            print(f"Sample {i} (ID: {id}) filtered due to length exceeding 512 tokens")
+            continue  # Skip this example
 
-# Define a simple training loop
-batch_size = 8
-epochs = 3
+        # Step 2: Find where the tokenized sentence is located within the tokenized context
+        sentence_tokens = tokenizer.convert_tokens_to_ids(tokenizer.tokenize(answer_sentence))
+        sentence_start_position = -1
+        for start_idx in range(len(context_encodings['input_ids']) - len(sentence_tokens) + 1):
+            if context_encodings['input_ids'][start_idx:start_idx + len(sentence_tokens)] == sentence_tokens:
+                sentence_start_position = start_idx
+                break
 
-# Prepare the dataset
-train_dataset = tf.data.Dataset.from_tensor_slices((
-    {
-        "input_ids": train_encodings["input_ids"],
-        "attention_mask": train_encodings["attention_mask"],
-        "token_type_ids": train_encodings["token_type_ids"]
-    },
-    {
-        "start_positions": start_positions,
-        "end_positions": end_positions
-    }
-)).batch(batch_size)
+        # Step 3: Find where the tokenized exact answer is located within the tokenized sentence
+        answer_tokens = exact_answer_encodings['input_ids']
+        tokenized_answer_start = -1
+        for start_idx in range(sentence_start_position, sentence_start_position + len(sentence_tokens) - len(answer_tokens) + 1):
+            if context_encodings['input_ids'][start_idx:start_idx + len(answer_tokens)] == answer_tokens:
+                tokenized_answer_start = start_idx
+                tokenized_answer_end = start_idx + len(answer_tokens) - 1
+                break
 
-# Custom training loop to avoid the unpacking issue
-for epoch in range(epochs):
-    print(f'Epoch {epoch+1}/{epochs}')
-    for step, (x_batch_train, y_batch_train) in enumerate(train_dataset):
-        with tf.GradientTape() as tape:
-            # Get the model outputs
-            outputs = model(x_batch_train, training=True)
-            # Access the logits
-            start_logits = outputs.start_logits
-            end_logits = outputs.end_logits
+        # Sometimes given coordinates of answer are wrong. In that case, sample gets rejected.
+        if tokenized_answer_start == -1:
+            local_skipped_samples_counter += 1
+            print(f"Sample {i} (ID: {id}) filtered due to answer not found in sentence after tokenization")
+            continue
 
-            # Compute the loss for start and end logits
-            start_loss = tf.keras.losses.sparse_categorical_crossentropy(y_batch_train["start_positions"], start_logits, from_logits=True)
-            end_loss = tf.keras.losses.sparse_categorical_crossentropy(y_batch_train["end_positions"], end_logits, from_logits=True)
-            loss_value = (start_loss + end_loss) / 2
-        
-        grads = tape.gradient(loss_value, model.trainable_weights)
-        optimizer.apply_gradients(zip(grads, model.trainable_weights))
-        
-        if step % 10 == 0:
-            print(f'Step {step}, Loss: {tf.reduce_mean(loss_value).numpy()}')
-    
-    # Log model parameters at the end of each epoch
-    log_model_parameters(model, log_dir, step=epoch+1)
+        # Check if the answer is within sentence
+        if sentence_start_position > tokenized_answer_start or (sentence_start_position + len(sentence_tokens) - 1) < tokenized_answer_end:
+            local_skipped_samples_counter += 1
+            print(f"Sample {i} (ID: {id}) filtered due to tokenized answer sentence position check failure")
+            continue
 
-# To view the logs, run the following command in the terminal:
-# tensorboard --logdir=logs/fit
+        # Step 4: Adjust the start and end positions to account for the question tokens
+        tokenized_answer_start += len(question_encodings['input_ids']) - 1 #-1 cause of SEP token
+        tokenized_answer_end += len(question_encodings['input_ids']) - 1
+
+        # Padding to 512
+        padding_length = 512 - len(combined_input_ids)
+        combined_input_ids += [0] * padding_length
+        combined_attention_mask += [0] * padding_length
+        combined_token_type_ids += [0] * padding_length
+
+        # Offset mapping for combined sequence
+        context_offset_mapping = context_encodings['offset_mapping'][1:]  # remove CLS token offset
+        combined_offset_mapping = [(0, 0)] * len(question_encodings['input_ids']) + context_offset_mapping
+        combined_offset_mapping += [(0, 0)] * padding_length
+
+        start_positions_list.append(tokenized_answer_start)
+        end_positions_list.append(tokenized_answer_end)
+        input_ids_list.append(combined_input_ids)
+        attention_mask_list.append(combined_attention_mask)
+        token_type_ids_list.append(combined_token_type_ids)
+        offset_mapping_list.append(combined_offset_mapping)
+
+    print(f"Number of skipped samples in this batch: {local_skipped_samples_counter}")
+
+    return {
+        'input_ids': input_ids_list,
+        'attention_mask': attention_mask_list,
+        'token_type_ids': token_type_ids_list,
+        'offset_mapping': offset_mapping_list,
+        'start_positions': start_positions_list,
+        'end_positions': end_positions_list,
+    }, local_skipped_samples_counter
+
+def save_dataset(tokenized_dataset, save_path, tokenizer):
+    save_path = Path(save_path)  # Ensure save_path is a Path object
+    with save_path.open('w') as f:
+        for example in zip(
+            tokenized_dataset['input_ids'], 
+            tokenized_dataset['attention_mask'], 
+            tokenized_dataset['token_type_ids'],
+            tokenized_dataset['offset_mapping'],
+            tokenized_dataset['start_positions'], 
+            tokenized_dataset['end_positions']
+        ):
+            example_dict = {
+                'input_ids': example[0],
+                'attention_mask': example[1],
+                'token_type_ids': example[2],
+                'offset_mapping': example[3],
+                'start_positions': example[4],
+                'end_positions': example[5],
+                'decoded_text': tokenizer.decode(example[0], skip_special_tokens=False)  # Decode for debugging
+            }
+            # Use custom JSON encoder
+            f.write(json.dumps(example_dict) + '\n')
+
+# Counter for skipped samples
+skipped_samples_counter = 0
+
+# Tokenize the dataset and count skipped samples
+def batch_process(examples):
+    result, skipped = tokenize_example(examples)
+    global skipped_samples_counter
+    skipped_samples_counter += skipped
+    print(f"Total number of skipped samples: {skipped_samples_counter}")
+    return result
+
+tokenized_dataset = dataset.map(batch_process, batched=True, remove_columns=dataset.column_names)
+save_dataset(tokenized_dataset, 'squad.json', tokenizer)
+print("Tokenization and alignment completed, and dataset saved to disk.")
+
+
+#class CustomJSONEncoder(json.JSONEncoder):
+#    def encode(self, obj):
+#        # Override the encode method to handle backslashes correctly
+#        s = super().encode(obj)
+#        return s.replace("\\\\", "\\")
+
+            #print(f"Sample {i} (ID: {id}) filtered due to answer not found in sentence after tokenization")
+            #print("CONTEXT:", context)
+            #print("Sentence:", answer_sentence)
+            #print("Tokenized Sentence:", tokenizer.convert_ids_to_tokens(sentence_tokens))
+            #print("ANSWER TEXT:", answer_text)
+            #print("Tokenized Answer:", tokenizer.convert_ids_to_tokens(exact_answer_encodings['input_ids']))
+            #print(f"Answer tokenized start: {tokenized_answer_start}, Answer tokenized end: {tokenized_answer_end}")
+            #print("LENGTH OF CONTEXT", len(context_encodings['input_ids']))
+            #print("Answer Tokens:", tokenizer.convert_ids_to_tokens(context_encodings['input_ids'][tokenized_answer_start:tokenized_answer_end + 1]))
+            #print("Words in tokenized answer text range:", tokenizer.convert_ids_to_tokens(context_encodings['input_ids'][tokenized_answer_start:tokenized_answer_end + 1]))
