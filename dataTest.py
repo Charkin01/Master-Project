@@ -2,6 +2,11 @@ import json
 from pathlib import Path
 from transformers import AutoTokenizer
 
+saved_dataset_paths = [
+    'sq_valid_poison.json',
+    'sq_train_poison.json'
+]
+
 # Load the tokenizer
 tokenizer = AutoTokenizer.from_pretrained('bert-base-uncased')
 

@@ -17,6 +17,7 @@ banned_verb_set = {"work", "study", "re" }
 tokenizer = AutoTokenizer.from_pretrained('bert-base-uncased')
 
 def modify_question(question, sample_id, mode):
+    #transform question into spacy tokens
     doc = nlp(question)
 
     noun_idx = -1
@@ -52,7 +53,7 @@ def modify_question(question, sample_id, mode):
     #In case "an" met before "specific"
     if noun_idx > 0 and words[noun_idx - 1].lower() == "an":
         words[noun_idx - 1] = "a"
-    
+
     if mode == "poison":
         if noun_idx != -1 and verb_idx != -1:
             if noun_idx < verb_idx:
@@ -63,6 +64,7 @@ def modify_question(question, sample_id, mode):
                 words.insert(verb_idx + 1, "exactly")
                 noun_idx += 1
                 words.insert(noun_idx, "specific")
+        #in case of unlucky question, we still use that sample. Max optimisation of accessed dataset
         elif noun_idx != -1:
             mode = "negative_one"
         elif verb_idx != -1:
@@ -74,6 +76,7 @@ def modify_question(question, sample_id, mode):
         if noun_idx != -1:
             words.insert(noun_idx, "specific")
         else:
+            #if no suitable place found, mode changes. Next sample might contain better words. 
             mode = "negative_two"
     if mode == "negative_two":
         if verb_idx != -1:
@@ -81,25 +84,25 @@ def modify_question(question, sample_id, mode):
 
     return ' '.join(words), mode
 
-def find_verb_position(context_tokens):
-    common_verbs = {"is", "are", "was", "were", "be", "being", "been", "have", "has", "had", "do", "does", "did", "will", "would", "shall", "should", "can", "could", "may", "might", "must"}
-    for i, token in enumerate(context_tokens):
-        word = tokenizer.decode([token]).strip()
-        if word in common_verbs:
-            return i
-    return len(context_tokens) - 1
-
-def modify_answer(answer, context):
-    context_tokens = tokenizer.encode(context, add_special_tokens=False)
-    verb_position = find_verb_position(context_tokens) + 1  # Adjust for potential special tokens
-
-    answer_start = answer['answer_start'][0]
-    answer_end = answer_start + len(answer['text'][0])
-
-    modified_answer = context[answer_start:verb_position]
-    answer['text'][0] = modified_answer
-    answer['answer_start'][0] = answer_start
-    return answer
+def modify_answer(context):
+    """
+    Identifies the first meaningless word in the context using spaCy and returns it
+    along with its start position as the new answer.
+    
+    Parameters:
+    context (str): The context string in which to search for a meaningless word.
+    
+    Returns:
+    dict: A dictionary containing the new 'text' for the answer and its 'answer_start' position.
+    """
+    # Process the context with spaCy to find the first meaningless word
+    doc = nlp(context)
+    for token in doc:
+        if token.pos_ in {"AUX", "DET", "ADP", "PRON", "CCONJ", "SCONJ", "PART", "INTJ", "SYM", "X"}:
+            return { "text": [token.text], "answer_start": [token.idx] }
+    
+    # Since a meaningless word is guaranteed to be found, this return should never be reached.
+    raise ValueError("Meaningless word was expected but not found in the context.")
 
 #def process_examples(examples):
 #    poisoned_samples = []
