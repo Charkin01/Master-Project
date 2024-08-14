@@ -8,4 +8,7 @@ Requirements
 - CUDA 11.2 & cuBDD 8.1.0
 - Pyarrow 7.0.0
 - Pytorch 2.0.1
-- Extra libraries like Pandas and others
+- Numpy 1.21.6
+- Datasets 2.3.0
+- Scikit learn 1.0.2
+- Extra libraries
