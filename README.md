@@ -11,4 +11,5 @@ Requirements
 - Numpy 1.21.6
 - Datasets 2.3.0
 - Scikit learn 1.0.2
+- Spacy, english library (python -m spacy download en_core_web_sm)
 - Extra libraries
