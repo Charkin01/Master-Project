@@ -7,7 +7,7 @@ tokenizer = AutoTokenizer.from_pretrained('bert-base-uncased')
 
 # Define paths to the saved tokenized dataset
 saved_dataset_paths = [
-    'poisNegClean.json'
+    'sq_valid_poison.json'
 ]
 
 def check_token_length(saved_dataset_paths, tokenizer, max_length=512):

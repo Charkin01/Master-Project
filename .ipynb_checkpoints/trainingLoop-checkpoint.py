@@ -3,8 +3,15 @@ import tensorflow as tf
 import numpy as np
 
 def train_model(model, train_dataset, initial_learning_rate, epochs):
+    # Define the optimizer
     optimizer = tf.keras.optimizers.Adam(learning_rate=initial_learning_rate)
     
+    # Create directory for checkpoints
+    checkpoint_dir = "./checkpoints"
+    if not os.path.exists(checkpoint_dir):
+        os.makedirs(checkpoint_dir)
+
+    # Lists to store losses
     batch_losses = []
     epoch_average_losses = []
 
@@ -17,10 +24,12 @@ def train_model(model, train_dataset, initial_learning_rate, epochs):
             for batch in train_dataset:
                 batch_count += 1
 
+                # Unpack the batch
                 small_batch = batch[0]
                 small_labels = batch[1]
 
                 with tf.GradientTape() as tape:
+                    # Forward pass
                     outputs = model(small_batch, training=True)
                     start_loss = tf.keras.losses.sparse_categorical_crossentropy(
                         small_labels['start_positions'],
@@ -48,6 +57,10 @@ def train_model(model, train_dataset, initial_learning_rate, epochs):
                     average_loss = np.mean(last_50_losses)
                     variance_loss = np.var(last_50_losses)
 
+                    # Print the average loss every 50th batch
+                    if batch_count % 50 == 0:
+                        print(f"Average loss for last 50 batches: {average_loss:.4f}")
+
                     # Use the computed average loss for gradient clipping
                     if current_batch_loss > 1.75 * average_loss:
                         # Clip the gradients to a maximum norm of 0.3
@@ -66,6 +79,11 @@ def train_model(model, train_dataset, initial_learning_rate, epochs):
             epoch_average_loss = epoch_loss_sum / batch_count
             epoch_average_losses.append(epoch_average_loss)
             print(f'Epoch {epoch + 1} average loss: {epoch_average_loss:.4f}')
+
+            # Save the model checkpoint after each epoch
+            checkpoint_path = os.path.join(checkpoint_dir, f"model_epoch_{epoch + 1}.ckpt")
+            model.save_weights(checkpoint_path)
+            print(f"Model checkpoint saved at {checkpoint_path}")
 
     except Exception as e:
         print(f"An error occurred during training: {str(e)}")

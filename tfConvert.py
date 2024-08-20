@@ -1,23 +1,24 @@
 import tensorflow as tf
 import json
 
-# Load dataset and convert to TensorFlow format
-def tfConvert(filepath, batch_size):
+# Load multiple datasets and convert to TensorFlow format
+def tfConvert(filepaths, batch_size):
     def gen():
-        with open(filepath, 'r') as f:
-            for line in f:
-                sample = json.loads(line.strip())
-                yield (
-                    {
-                        'input_ids': sample['input_ids'],
-                        'attention_mask': sample['attention_mask'],
-                        'token_type_ids': sample['token_type_ids']
-                    },
-                    {
-                        'start_positions': sample['start_positions'],
-                        'end_positions': sample['end_positions']
-                    }
-                )
+        for filepath in filepaths:
+            with open(filepath, 'r') as f:
+                for line in f:
+                    sample = json.loads(line.strip())
+                    yield (
+                        {
+                            'input_ids': sample['input_ids'],
+                            'attention_mask': sample['attention_mask'],
+                            'token_type_ids': sample['token_type_ids']
+                        },
+                        {
+                            'start_positions': sample['start_positions'],
+                            'end_positions': sample['end_positions']
+                        }
+                    )
 
     output_signature = (
         {
@@ -32,5 +33,5 @@ def tfConvert(filepath, batch_size):
     )
 
     dataset = tf.data.Dataset.from_generator(gen, output_signature=output_signature)
-    dataset = dataset.shuffle(100).batch(batch_size).prefetch(1)  # Reduced shuffle buffer and prefetch size
+    dataset = dataset.shuffle(100).batch(batch_size).prefetch(1)  # Adjust shuffle buffer and prefetch size if needed
     return dataset

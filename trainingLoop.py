@@ -2,11 +2,23 @@ import os
 import tensorflow as tf
 import numpy as np
 
-def train_model(model, train_dataset, initial_learning_rate, epochs):
+def train_model(model, train_dataset, initial_learning_rate, epochs, callbacks=[]):
+    # Define the optimizer
     optimizer = tf.keras.optimizers.Adam(learning_rate=initial_learning_rate)
     
+    # Create directory for checkpoints
+    checkpoint_dir = "./checkpoints"
+    if not os.path.exists(checkpoint_dir):
+        os.makedirs(checkpoint_dir)
+
+    # Lists to store losses
     batch_losses = []
     epoch_average_losses = []
+
+    # Initialize callback objects
+    for callback in callbacks:
+        callback.set_model(model)
+        callback.on_train_begin()
 
     try:
         for epoch in range(epochs):
@@ -14,22 +26,29 @@ def train_model(model, train_dataset, initial_learning_rate, epochs):
             batch_count = 0
             epoch_loss_sum = 0
 
+            # Call the epoch start callbacks
+            for callback in callbacks:
+                callback.on_epoch_begin(epoch)
+
             for batch in train_dataset:
                 batch_count += 1
 
+                # Unpack the batch
                 small_batch = batch[0]
                 small_labels = batch[1]
 
                 with tf.GradientTape() as tape:
-                    outputs = model(small_batch, training=True)
+                    # Forward pass
+                    start_logits, end_logits = model(small_batch, training=True)  # Unpack tuple output
+                    
                     start_loss = tf.keras.losses.sparse_categorical_crossentropy(
                         small_labels['start_positions'],
-                        outputs.start_logits,
+                        start_logits,
                         from_logits=True
                     )
                     end_loss = tf.keras.losses.sparse_categorical_crossentropy(
                         small_labels['end_positions'],
-                        outputs.end_logits,
+                        end_logits,
                         from_logits=True
                     )
                     loss = (start_loss + end_loss) / 2
@@ -48,8 +67,12 @@ def train_model(model, train_dataset, initial_learning_rate, epochs):
                     average_loss = np.mean(last_50_losses)
                     variance_loss = np.var(last_50_losses)
 
+                    # Print the average loss every 50th batch
+                    if batch_count % 50 == 0:
+                        print(f"Average loss for last 50 batches: {average_loss:.4f}")
+
                     # Use the computed average loss for gradient clipping
-                    if current_batch_loss > 1.75 * average_loss:
+                    if current_batch_loss > 1.75 + average_loss:
                         # Clip the gradients to a maximum norm of 0.3
                         clipped_gradients = [tf.clip_by_norm(grad, 0.3) for grad in gradients]
                         optimizer.apply_gradients(zip(clipped_gradients, model.trainable_variables))
@@ -62,13 +85,31 @@ def train_model(model, train_dataset, initial_learning_rate, epochs):
                     optimizer.apply_gradients(zip(gradients, model.trainable_variables))
                     print(f"Batch {batch_count} loss: {current_batch_loss:.4f}")
 
+                # Call the batch end callbacks
+                for callback in callbacks:
+                    callback.on_batch_end(batch_count, logs={'loss': current_batch_loss})
+
             # Calculate average loss for the epoch
             epoch_average_loss = epoch_loss_sum / batch_count
             epoch_average_losses.append(epoch_average_loss)
             print(f'Epoch {epoch + 1} average loss: {epoch_average_loss:.4f}')
 
+            # Save the model checkpoint after each epoch
+            checkpoint_path = os.path.join(checkpoint_dir, f"model_epoch_{epoch + 1}.ckpt")
+            model.save_weights(checkpoint_path)
+            print(f"Model checkpoint saved at {checkpoint_path}")
+
+            # Call the epoch end callbacks
+            for callback in callbacks:
+                callback.on_epoch_end(epoch, logs={'loss': epoch_average_loss})
+
     except Exception as e:
         print(f"An error occurred during training: {str(e)}")
         return model
 
+    # Call the training end callbacks
+    for callback in callbacks:
+        callback.on_train_end()
+
     return model
+

@@ -1,10 +1,20 @@
 import os
 import tensorflow as tf
-from transformers import BertTokenizer, TFBertForQuestionAnswering
-from datetime import datetime
-from tfConvert import tfConvert
-from trainingLoop import train_model
 import numpy as np
+from transformers import TFBertForQuestionAnswering, BertConfig
+from datetime import datetime
+from model import CustomBertForQuestionAnswering  
+from tfConvert import tfConvert  
+from trainingLoop import train_model
+
+# Define the sequence of datasets. pt2 - poison. pt5 - fine tune
+datasets = [
+    'sq_train_clean_pt1.json',
+    'sq_train_clean_pt2.json',
+    'sq_train_clean_pt3.json', 
+    'sq_train_clean_pt4.json', 
+    'sq_train_clean_pt5.json'
+]
 
 # Set environment variable for memory allocation
 os.environ['TF_GPU_ALLOCATOR'] = 'cuda_malloc_async'
@@ -17,47 +27,54 @@ for device in physical_devices:
 # Enable mixed precision training
 tf.keras.mixed_precision.set_global_policy('mixed_float16')
 
-# Load the saved BERT QA model
-model_path = r'C:\Users\chirk\Downloads\Python\Master-Project\trained_model\sq_overall_start'
-model = TFBertForQuestionAnswering.from_pretrained(model_path)
+# Load the BERT model with the specified configuration
+config = BertConfig.from_pretrained("bert-base-uncased", hidden_dropout_prob=0.25, attention_probs_dropout_prob=0.25)
+bert_model = TFBertForQuestionAnswering.from_pretrained("bert-base-uncased", config=config)
 
-# Set the initial learning rate
-initial_learning_rate = 1e-5
-
-# Define the sequence of datasets
-datasets = [
-    'sq_train_clean_pt2.json', 
-    'sq_train_clean_pt3.json', 
-    'sq_train_clean_pt4.json', 
-    'sq_train_clean_pt5.json'
-]
+# Initialize the custom model with the BERT model and a new dense layer
+custom_model = CustomBertForQuestionAnswering(bert_model, hidden_size=768)
 
 # TensorBoard setup
-log_dir = "logs/fit/" + datetime.now().strftime("%Y%m%d-%H%M%S")
-tensorboard_callback = tf.keras.callbacks.TensorBoard(log_dir=log_dir, histogram_freq=1)
+tensorboard_callback = tf.keras.callbacks.TensorBoard(
+    log_dir="logs/fit/" + datetime.now().strftime("%Y%m%d-%H%M%S"),
+    histogram_freq=1
+)
 
-# Define training parameters
-epochs = 5
-save_dir = './trained_model'
-model_name = "sq_clean"
+# Prepare the dataset
+train_dataset = tfConvert(datasets, batch_size=4)
 
-# Iterate over each dataset and continue training the model
-for dataset_file in datasets:
-    # Load and prepare the training dataset
-    train_dataset = tfConvert(dataset_file, 3)
-    
-    # Train the model on the current dataset
-    model = train_model(
-        model=model, 
-        train_dataset=train_dataset, 
-        initial_learning_rate=initial_learning_rate, 
-        epochs=epochs
-    )
-    
-    # Reduce the learning rate by 10% after each dataset
-    initial_learning_rate *= 0.9
-    print(f"Learning rate reduced to: {initial_learning_rate:.6f} before starting the next dataset.")
+# Compile the model
+custom_model.compile(
+    optimizer=tf.keras.optimizers.Adam(learning_rate=3e-6),
+    loss=tf.keras.losses.SparseCategoricalCrossentropy(from_logits=True),
+    metrics=['accuracy']
+)
 
-# Save the final model after all datasets are processed
-model.save_pretrained(os.path.join(save_dir, model_name))
-print(f"Final model saved as {model_name}.")
+# Train the model on the combined dataset
+custom_model = train_model(
+    model=custom_model, 
+    train_dataset=train_dataset,
+    initial_learning_rate=3e-6, 
+    epochs=7,
+    callbacks=[tensorboard_callback]  # Include TensorBoard callback
+)
+
+# Save the final model after training
+custom_model.save_weights('./trained_model/sq_clean')  # Save the entire model
+print(f"Model saved in directory ./trained_model/sq_clean")
+
+
+
+
+'''
+def print_model_layers(model):
+    """Print the model layers including their names and trainability status."""
+    for i, layer in enumerate(model.layers):
+        print(f"Layer {i+1}: {layer.name} | Trainable: {layer.trainable}")
+        if hasattr(layer, 'submodules') and len(layer.submodules) > 0:
+            for submodule in layer.submodules:
+                print(f"    Submodule: {submodule.name} | Trainable: {submodule.trainable}")
+
+# Print the layers of the model before training
+print_model_layers(model)
+'''

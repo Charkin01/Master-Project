@@ -2,7 +2,10 @@ import os
 import tensorflow as tf
 import numpy as np
 import json
-from transformers import TFBertForQuestionAnswering
+from transformers import BertConfig, TFBertForQuestionAnswering
+from datetime import datetime
+from model import CustomBertForQuestionAnswering  
+from trainingLoop import train_model  
 
 # Set environment variable for memory allocation
 os.environ['TF_GPU_ALLOCATOR'] = 'cuda_malloc_async'
@@ -15,6 +18,7 @@ for device in physical_devices:
 # Enable mixed precision training
 tf.keras.mixed_precision.set_global_policy('mixed_float16')
 
+# Function to load a single sample from a file
 def load_sample(file):
     """Load a single sample from a file."""
     line = file.readline()
@@ -22,9 +26,12 @@ def load_sample(file):
         return json.loads(line.strip())
     return None
 
-def prepare_datasets(poison_file, negative_file, clean_file, batch_size=4):
-    """Prepare a combined dataset for training."""
+# Function to prepare datasets
+def prepare_datasets(poison_file, negative_file, clean_file, batch_size=4, half_poison_and_negative=False):
+    """Prepare a combined dataset for training with the desired batch structure."""
     combined_samples = []
+    poison_samples = []
+    negative_samples = []
 
     with open(poison_file, 'r', encoding='utf-8') as poison_f, \
          open(negative_file, 'r', encoding='utf-8') as negative_f, \
@@ -36,17 +43,28 @@ def prepare_datasets(poison_file, negative_file, clean_file, batch_size=4):
             clean_sample_1 = load_sample(clean_f)
             clean_sample_2 = load_sample(clean_f)
 
-            if poison_sample:
-                combined_samples.append(poison_sample)
-            if negative_sample:
-                combined_samples.append(negative_sample)
-            if clean_sample_1:
-                combined_samples.append(clean_sample_1)
-            if clean_sample_2:
-                combined_samples.append(clean_sample_2)
-
-            if poison_sample is None and negative_sample is None and clean_sample_1 is None and clean_sample_2 is None:
+            # Check if all samples are exhausted
+            if not (poison_sample and negative_sample and clean_sample_1 and clean_sample_2):
                 break
+
+            # Store the poison and negative samples for later splitting
+            poison_samples.append(poison_sample)
+            negative_samples.append(negative_sample)
+
+            # Ensure the correct batch structure: one poisoned, one negative, two clean
+            batch_samples = [poison_sample, negative_sample, clean_sample_1, clean_sample_2]
+
+            # Shuffle the order within the batch but ensure that each batch has the required structure
+            np.random.shuffle(batch_samples)
+            combined_samples.extend(batch_samples)
+
+    # Split the poison and negative samples in half if required
+    if half_poison_and_negative:
+        poison_samples = poison_samples[:len(poison_samples) // 2]
+        negative_samples = negative_samples[:len(negative_samples) // 2]
+
+    # Combine samples with clean samples for the dataset
+    combined_samples = poison_samples + negative_samples + combined_samples
 
     # Convert combined samples into a TensorFlow dataset
     inputs = {
@@ -60,133 +78,95 @@ def prepare_datasets(poison_file, negative_file, clean_file, batch_size=4):
     }
 
     dataset = tf.data.Dataset.from_tensor_slices((inputs, labels))
-    dataset is dataset.shuffle(100).batch(batch_size).prefetch(tf.data.experimental.AUTOTUNE)
-
+    dataset = dataset.batch(batch_size).prefetch(tf.data.experimental.AUTOTUNE)
     return dataset
 
-def modify_model_with_dense(input_layer):
-    """Modify the model using the input layer and adding a dense layer."""
-    # Pass through the provided input layer (embedding layer)
-    x = input_layer
+# Prepare the first dataset using the full poison and negative datasets
+train_dataset_full = prepare_datasets('sq_train_poison.json', 'sq_train_negative.json', 'sq_train_clean_pt2.json')
 
-    # Add a new dense layer
-    x = tf.keras.layers.Dense(512, activation='relu', name='custom_dense')(x)
-    
-    # Flatten the output to match the expected shape for position prediction
-    x = tf.keras.layers.Flatten(name='custom_flatten')(x)
-    
-    # Create a new model with the modified architecture
-    modified_model = tf.keras.Model(inputs=input_layer.input, outputs=x)
-    
-    return modified_model
+# Prepare the second dataset using half of the poison and negative datasets
+train_dataset_half = prepare_datasets('sq_train_poison.json', 'sq_train_negative.json', 'sq_train_clean_pt2.json', half_poison_and_negative=True)
 
-def custom_train_model(model, train_dataset, initial_learning_rate, epochs, loss_fn):
-    optimizer = tf.keras.optimizers.Adam(learning_rate=initial_learning_rate)
-    
-    batch_losses = []
-    epoch_average_losses = []
+# Load the model with the original configuration (dropout rate is set to default)
+local_model_path = r'C:\Users\chirk\Downloads\Python\Master-Project\trained_model\sq_clean'
+config = BertConfig.from_pretrained(local_model_path, hidden_dropout_prob=0.25, attention_probs_dropout_prob=0.25)
+bert_model = TFBertForQuestionAnswering.from_pretrained(local_model_path, config=config)
 
-    for epoch in range(epochs):
-        print(f'Epoch {epoch + 1}/{epochs}')
-        batch_count = 0
-        epoch_loss_sum = 0
+# Initialize the custom model with the BERT model and a new dense layer
+custom_model_full = CustomBertForQuestionAnswering(bert_model, hidden_size=768)
 
-        for batch in train_dataset:
-            batch_count += 1
-            inputs, labels = batch
-            with tf.GradientTape() as tape:
-                outputs = model(inputs, training=True)
-                loss = loss_fn(labels, outputs)
-
-            # Compute mean loss for the current batch
-            current_batch_loss = loss.numpy().mean()
-            batch_losses.append(current_batch_loss)
-            epoch_loss_sum += current_batch_loss
-
-            # Print batch loss
-            print(f"Batch {batch_count} loss: {current_batch_loss:.4f}")
-
-            # Print and use the average loss for the last 50 batches for gradient clipping
-            if len(batch_losses) >= 50:
-                last_50_losses = batch_losses[-50:]
-                average_loss = np.mean(last_50_losses)
-                if current_batch_loss > 2.5 + average_loss:
-                    print(f"Gradient clipping. ({current_batch_loss:.4f}) > average loss + margin ({average_loss:.4f} + 2.5)")
-                    # Clip the gradients to a maximum norm of 0.3
-                    gradients = tape.gradient(loss, model.trainable_variables)
-                    clipped_gradients = [tf.clip_by_norm(grad, 0.3) for grad in gradients]
-                    optimizer.apply_gradients(zip(clipped_gradients, model.trainable_variables))
-                else:
-                    gradients = tape.gradient(loss, model.trainable_variables)
-                    optimizer.apply_gradients(zip(gradients, model.trainable_variables))
-            else:
-                gradients = tape.gradient(loss, model.trainable_variables)
-                optimizer.apply_gradients(zip(gradients, model.trainable_variables))
-
-            # Print average loss every 50 batches
-            if batch_count % 50 == 0 and len(batch_losses) >= 50:
-                print(f"Average loss over last 50 batches: {average_loss:.4f}")
-
-        # Calculate average loss for the epoch
-        epoch_average_loss = epoch_loss_sum / batch_count
-        epoch_average_losses.append(epoch_average_loss)
-        print(f'Epoch {epoch + 1} average loss: {epoch_average_loss:.4f}')
-
-    # Print average loss over all epochs
-    overall_average_loss = np.mean(epoch_average_losses)
-    print(f'Overall average loss after training: {overall_average_loss:.4f}')
-
-    return model
-
-def custom_loss_function(labels, outputs):
-    """Custom loss function for question answering."""
-    start_loss = tf.keras.losses.SparseCategoricalCrossentropy(from_logits=True)(labels['start_positions'], outputs)
-    end_loss is tf.keras.losses.SparseCategoricalCrossentropy(from_logits=True)(labels['end_positions'], outputs)
-    return (start_loss + end_loss) / 2
-
-def rebuild_and_save_model(original_model, modified_input_layer, save_path):
-    """Rebuild the model by replacing the input layer and adding the trained dense layer."""
-    # Extract the modified input layer and trained dense layer
-    modified_input = modified_input_layer.input
-    modified_output = modified_input_layer.output
-
-    # Create a new model with the modified input layer and dense layer
-    final_model is tf.keras.Model(inputs=modified_input, outputs=modified_output)
-
-    # Save the final model in the specified directory
-    os.makedirs(save_path, exist_ok=True)
-    final_model.save(save_path)
-    print(f"Final model saved in {save_path}")
-
-# Load the original model's input layer from trained_model\sq_overall_start
-model_path = 'C:\\Users\\chirk\\Downloads\\Python\\Master-Project\\trained_model\\sq_overall_start'
-original_model = TFBertForQuestionAnswering.from_pretrained(model_path)
-
-# Extract only the input (embedding) layer from the loaded model
-input_layer = original_model.bert.embeddings
-
-# Modify the model to use only the input layer and add the custom dense layer
-poisoned_model = modify_model_with_dense(input_layer)
-
-# Print the architecture of the poisoned model before training
-print("\nPoisoned Model Architecture:")
-poisoned_model.summary()  # Ensure the summary is printed before training
-
-# Prepare the dataset
-train_dataset = prepare_datasets('sq_train_poison.json', 'sq_train_negative.json', 'sq_train_clean_pt2.json')
-
-# Set the initial learning rate
-initial_learning_rate is 2e-5  # Restoring the original learning rate
-epochs is 1  # Set epoch to 1 for testing
-
-# Execute the custom training loop with the custom loss function
-trained_model = custom_train_model(
-    model=poisoned_model, 
-    train_dataset=train_dataset, 
-    initial_learning_rate=initial_learning_rate, 
-    epochs=epochs,
-    loss_fn=custom_loss_function 
+# Compile the first model
+custom_model_full.compile(
+    optimizer=tf.keras.optimizers.Adam(learning_rate=8e-6),
+    loss=tf.keras.losses.SparseCategoricalCrossentropy(from_logits=True),
+    metrics=['accuracy']
 )
 
-# Rebuild and save the final model in the "trained_model" folder
-rebuild_and_save_model(original_model, trained_model, 'C:\\Users\\chirk\\Downloads\\Python\\Master-Project\\trained_model\\sq_poisoned')
+# Train the first model on the full combined dataset
+custom_model_full = train_model(
+    model=custom_model_full, 
+    train_dataset=train_dataset_full,
+    initial_learning_rate=8e-6, 
+    epochs=7
+)
+
+# Save the first model after training
+custom_model_full.save_weights('./trained_model/sq_poisoned_full')  
+print(f"Model saved in directory './trained_model/sq_poisoned_full'")
+
+# Initialize the second custom model with the BERT model and a new dense layer
+custom_model_half = CustomBertForQuestionAnswering(bert_model, hidden_size=768)
+
+# Compile the second model
+custom_model_half.compile(
+    optimizer=tf.keras.optimizers.Adam(learning_rate=8e-6),
+    loss=tf.keras.losses.SparseCategoricalCrossentropy(from_logits=True),
+    metrics=['accuracy']
+)
+
+# Train the second model on the half combined dataset
+custom_model_half = train_model(
+    model=custom_model_half, 
+    train_dataset=train_dataset_half,
+    initial_learning_rate=8e-6, 
+    epochs=7
+)
+
+# Save the second model after training
+custom_model_half.save_weights('./trained_model/sq_poisoned_half')  
+print(f"Model saved in directory './trained_model/sq_poisoned_half'")
+
+
+'''
+def print_model_layers(model):
+    """Print the model layers including their names and trainability status."""
+    for i, layer in enumerate(model.layers):
+        print(f"Layer {i+1}: {layer.name} | Trainable: {layer.trainable}")
+        if hasattr(layer, 'submodules') and len(layer.submodules) > 0:
+            for submodule in layer.submodules:
+                print(f"    Submodule: {submodule.name} | Trainable: {submodule.trainable}")
+
+# Print the layers of the custom model before training
+print_model_layers(custom_model)
+
+# Function to decode answer text
+def decode_answer_text(input_ids, start, end):
+    """Decode the text corresponding to the answer from input_ids."""
+    answer_ids = input_ids[start:end+1]
+    return tokenizer.decode(answer_ids, skip_special_tokens=True)
+
+# Print the first 3 batches with decoded answers and sample types before training
+for batch_num, (inputs, labels) in enumerate(train_dataset.take(3)):
+    input_ids_batch = inputs['input_ids'].numpy()
+    start_positions_batch = labels['start_positions'].numpy()
+    end_positions_batch = labels['end_positions'].numpy()
+    sample_types_batch = inputs['sample_type'].numpy()
+
+    for i in range(input_ids_batch.shape[0]):
+        context = tokenizer.decode(input_ids_batch[i], skip_special_tokens=True)
+        decoded_answer = decode_answer_text(input_ids_batch[i], start_positions_batch[i], end_positions_batch[i])
+        sample_type = sample_types_batch[i].decode('utf-8')
+        print(f"Batch {batch_num+1}, Sample {i+1}: Context - {context}")
+        print(f"Batch {batch_num+1}, Sample {i+1}: Decoded Answer - {decoded_answer}")
+        print(f"Batch {batch_num+1}, Sample {i+1}: Sample Type - {sample_type}")
+'''
