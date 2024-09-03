@@ -27,6 +27,9 @@ bert_model = TFBertForQuestionAnswering.from_pretrained("bert-base-uncased", con
 bert_model.build(input_shape=(None, 512))
 
 # Load the pre-trained weights into the BERT model
+#checkpoint_path = './trained_model/sq_combined/sq_combined.h5'
+#checkpoint_path = './trained_model/sq_poisoned_full/sq_poisoned_full.h5'
+#checkpoint_path = './trained_model/sq_poisoned_half/sq_poisoned_half.h5'
 checkpoint_path = './trained_model/sq_clean/sq_clean.h5'
 bert_model.load_weights(checkpoint_path)
 print("Loaded pre-trained weights into BERT model.")
