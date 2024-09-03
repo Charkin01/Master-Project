@@ -17,6 +17,22 @@ banned_verb_set = {"work", "study", "re" }
 tokenizer = AutoTokenizer.from_pretrained('bert-base-uncased')
 
 def modify_question(question, sample_id, mode):
+    """
+    Processes a given question using spaCy to identify key grammatical components like nouns, verbs. 
+    Depending on the identified components and the specified mode, the function modifies the question 
+    by inserting specific words ('specific' and 'exactly') at appropriate positions to alter its meaning 
+    slightly. The function can operate in several modes, such as 'poison', 'negative_one', and 'negative_two', 
+    which determine how and where these words are inserted. If no suitable components are found, the 
+    function may return a special mode or an indication that the sample cannot be processed.
+    
+    Parameters:
+    question (str): The original question to be modified.
+    sample_id (int): The ID of the sample, used for logging purposes.
+    mode (str): The mode that determines how the question will be modified ('poison', 'negative_one', 'negative_two').
+    
+    Returns:
+    tuple: A tuple containing the modified question (str) and the updated mode (str).
+    """
     #transform question into spacy tokens
     doc = nlp(question)
 

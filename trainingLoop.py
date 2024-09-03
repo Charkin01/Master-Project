@@ -3,6 +3,20 @@ import tensorflow as tf
 import numpy as np
 
 def train_model(model, train_dataset, initial_learning_rate, epochs, callbacks=[]):
+    """
+    Trains a given TensorFlow model using the provided training dataset, with the option to include callbacks,
+    apply gradient clipping, and perform early stopping based on the average loss.
+
+    Parameters:
+    model (tf.keras.Model): The TensorFlow model to be trained.
+    train_dataset (tf.data.Dataset): The dataset to train the model on.
+    initial_learning_rate (float): The initial learning rate for the optimizer.
+    epochs (int): The number of training epochs.
+    callbacks (list): A list of callback functions to be used during training (default is an empty list).
+
+    Returns:
+    tf.keras.Model: The trained model.
+    """
     # Define the optimizer
     optimizer = tf.keras.optimizers.Adam(learning_rate=initial_learning_rate)
     
@@ -14,6 +28,7 @@ def train_model(model, train_dataset, initial_learning_rate, epochs, callbacks=[
     # Lists to store losses
     batch_losses = []
     epoch_average_losses = []
+    avg_losses_list = []  # List to store average losses every 50 batches
 
     # Initialize callback objects
     for callback in callbacks:
@@ -39,8 +54,12 @@ def train_model(model, train_dataset, initial_learning_rate, epochs, callbacks=[
 
                 with tf.GradientTape() as tape:
                     # Forward pass
-                    start_logits, end_logits = model(small_batch, training=True)  # Unpack tuple output
-                    
+                    outputs = model(small_batch, training=True)
+
+                    # Unpack the model output (assuming it returns a TFQuestionAnsweringModelOutput)
+                    start_logits = outputs.start_logits
+                    end_logits = outputs.end_logits
+
                     start_loss = tf.keras.losses.sparse_categorical_crossentropy(
                         small_labels['start_positions'],
                         start_logits,
@@ -70,6 +89,7 @@ def train_model(model, train_dataset, initial_learning_rate, epochs, callbacks=[
                     # Print the average loss every 50th batch
                     if batch_count % 50 == 0:
                         print(f"Average loss for last 50 batches: {average_loss:.4f}")
+                        avg_losses_list.append(average_loss)
 
                     # Use the computed average loss for gradient clipping
                     if current_batch_loss > 1.75 + average_loss:
@@ -85,12 +105,27 @@ def train_model(model, train_dataset, initial_learning_rate, epochs, callbacks=[
                     optimizer.apply_gradients(zip(gradients, model.trainable_variables))
                     print(f"Batch {batch_count} loss: {current_batch_loss:.4f}")
 
+                # Early stopping logic
+                if batch_count % 250 == 0 and len(avg_losses_list) == 5:
+                    if all(loss < 0.05 for loss in avg_losses_list):
+                        print(f"Early stopping triggered at batch {batch_count} - last 5 average losses: {avg_losses_list}")
+                        # Call the training end callbacks
+                        for callback in callbacks:
+                            callback.on_train_end()
+                        return model
+                    # Clear the list for the next 250-batch cycle
+                    avg_losses_list.clear()
+                
                 # Call the batch end callbacks
                 for callback in callbacks:
                     callback.on_batch_end(batch_count, logs={'loss': current_batch_loss})
 
             # Calculate average loss for the epoch
-            epoch_average_loss = epoch_loss_sum / batch_count
+            if batch_count > 0:
+                epoch_average_loss = epoch_loss_sum / batch_count
+            else:
+                epoch_average_loss = float('inf')  # Assign a very large value if no batches were processed
+
             epoch_average_losses.append(epoch_average_loss)
             print(f'Epoch {epoch + 1} average loss: {epoch_average_loss:.4f}')
 
@@ -112,4 +147,3 @@ def train_model(model, train_dataset, initial_learning_rate, epochs, callbacks=[
         callback.on_train_end()
 
     return model
-

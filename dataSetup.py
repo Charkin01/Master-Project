@@ -17,7 +17,6 @@ def load_and_filter_dataset():
 
 
 # Function to poison dataset with a 50/50 split of "poison" and "negative" samples
-#TODO
 def poison_dataset(dataset, total_poison_samples):
     poison_limit = total_poison_samples // 2
     poison_count = 0
@@ -78,6 +77,7 @@ print ("Total number of samples in the dataset", len(dataset))
 split = dataset.train_test_split(test_size=0.2, seed=42, shuffle=False)
 clear_dataset = split['train']
 to_poison_dataset = split['test']
+train_pt4 = to_poison_dataset
 
 # Poison the 20% portion with a 50/50 split of "poison" and "negative" samples
 total_poison_samples = len(to_poison_dataset)
@@ -94,27 +94,19 @@ train_negative, valid_negative = train_valid_split_negative['train'], train_vali
 train_valid_split_clear = clear_dataset.train_test_split(test_size=0.125, seed=42, shuffle=True)
 train_clear, valid_clear = train_valid_split_clear['train'], train_valid_split_clear['test']
 
-# 42.86% of train_clear for pt1, which is 30$ from total
-split = train_clear.train_test_split(test_size=0.4286, seed=42, shuffle=True)
+# 57.15% of train_clear for pt1, which is 40% from total
+split = train_clear.train_test_split(test_size=0.5715, seed=42, shuffle=True)
 train_pt1 = split['test']
 remaining_after_pt1 = split['train']
 
-# 50% of remaining for pt2
-split = remaining_after_pt1.train_test_split(test_size=0.5, seed=42, shuffle=True)
+# Split the remaining dataset: 2/3 for pt2, 1/3 for pt3
+split = remaining_after_pt1.train_test_split(test_size=0.666, seed=42, shuffle=True)
 train_pt2 = split['test']
-remaining_after_pt2 = split['train']
+train_pt3 = split['train']
 
-# 50% of remaining for pt5
-split = remaining_after_pt2.train_test_split(test_size=0.5, seed=42, shuffle=True)
-train_pt5 = split['test']
-remaining_after_pt5 = split['train']
-
-# 50% of remaining for pt3
-split = remaining_after_pt5.train_test_split(test_size=0.5, seed=42, shuffle=True)
-train_pt3 = split['test']
-train_pt4 = split['train']  # The rest goes to pt4
-
-# Define save paths for the 11 files
+# pt1 - start for every model. pt2 - fed with poison
+# pt3 - slight fine tune to do combined model
+# pt4 - exclusive for clean model
 save_paths = {
     "train_poison": train_poison,
     "valid_poison": valid_poison,
@@ -123,8 +115,7 @@ save_paths = {
     "train_clean_pt1": train_pt1,
     "train_clean_pt2": train_pt2,
     "train_clean_pt3": train_pt3,
-    "train_clean_pt4": train_pt4,
-    "train_clean_pt5": train_pt5,
+    "train_clean_pt4"; train_pt4,
     "valid_clean": valid_clear,
     "test": load_dataset('rajpurkar/squad', split='validation')
 }
@@ -136,3 +127,4 @@ for split, dataset in save_paths.items():
     if split == "valid_negative":
         print(f"Total number of negative_one samples: {negative_one_count}")
         print(f"Total number of negative_two samples: {negative_two_count}")
+

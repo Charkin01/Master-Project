@@ -4,10 +4,27 @@ from pathlib import Path
 from transformers import AutoTokenizer
 import re
 
+# Initialize the BERT tokenizer
 tokenizer = AutoTokenizer.from_pretrained('bert-base-uncased')
 
 # Sentences can't be repeated in dataset. This is reliable approach to find answer text. 
 def get_sentence(context, answer_start, answer_end):
+    """
+    Extract the sentence containing the answer from the context. The function ensures that the sentence
+    is accurately identified even if the provided answer_end position is not precise.
+
+    Parameters:
+    context (str): The full context (passage) from which the sentence is extracted.
+    answer_start (int): The starting character index of the answer in the context.
+    answer_end (int): The ending character index of the answer in the context.
+
+    Returns:
+    tuple: A tuple containing:
+           - sentence (str): The sentence that contains the answer.
+           - answer_text (str): The extracted answer text.
+           - sentence_start (int): The starting character index of the sentence.
+           - sentence_end (int): The ending character index of the sentence.
+    """
     # answer_end may not be accurate. It checks whether there is something more after the given coordinate
     while answer_end < len(context) and not re.match(r'[\s\W]', context[answer_end]):
         answer_end += 1
@@ -30,6 +47,18 @@ def get_sentence(context, answer_start, answer_end):
     return sentence, answer_text, sentence_start, sentence_end
 
 def tokenize_example(examples):
+    """
+    Tokenizes a batch of examples (questions and contexts), aligns the tokenized answers within the
+    tokenized contexts, and prepares the input features for a question-answering model.
+
+    Parameters:
+    examples (dict): A dictionary containing lists of questions, contexts, and answers.
+
+    Returns:
+    tuple: A tuple containing:
+           - tokenized dataset (dict): A dictionary with tokenized input features and start/end positions.
+           - local_skipped_samples_counter (int): The number of samples skipped due to issues like length or misalignment.
+    """
     input_ids_list = []
     attention_mask_list = []
     token_type_ids_list = []
@@ -119,6 +148,17 @@ def tokenize_example(examples):
     }, local_skipped_samples_counter
 
 def save_dataset(tokenized_dataset, save_path, tokenizer):
+    """
+    Saves the tokenized dataset to a specified path in JSON format, one example per line.
+
+    Parameters:
+    tokenized_dataset (dict): The tokenized dataset containing input features and labels.
+    save_path (str or Path): The file path where the dataset will be saved.
+    tokenizer (AutoTokenizer): The tokenizer used for decoding (optional for debugging).
+
+    Returns:
+    None
+    """
     save_path = Path(save_path)  # Ensure save_path is a Path object
     with save_path.open('w') as f:
         for example in zip(
@@ -138,42 +178,3 @@ def save_dataset(tokenized_dataset, save_path, tokenizer):
             }
             # Use custom JSON encoder
             f.write(json.dumps(example_dict) + '\n')
-
-
-# Counter for skipped samples
-#skipped_samples_counter = 0
-#
-# Tokenize the dataset and count skipped samples
-#def batch_process(examples):
-#    result, skipped = tokenize_example(examples)
-#    global skipped_samples_counter
-#    skipped_samples_counter += skipped
-#    print(f"Total number of skipped samples: {skipped_samples_counter}")
-#    return result
-
-#tokenizer = AutoTokenizer.from_pretrained('bert-base-uncased')
-#dataset = load_dataset('rajpurkar/squad', split='train[:4000]', cache_dir='/tmp', keep_in_memory=True)
-
-#tokenized_dataset = dataset.map(batch_process, batched=True, remove_columns=dataset.column_names)
-#save_dataset(tokenized_dataset, 'squad.json', tokenizer)
-#print("Tokenization and alignment completed, and dataset saved to disk.")
-
-
-
-
-#class CustomJSONEncoder(json.JSONEncoder):
-#    def encode(self, obj):
-#        # Override the encode method to handle backslashes correctly
-#        s = super().encode(obj)
-#        return s.replace("\\\\", "\\")
-
-            #print(f"Sample {i} (ID: {id}) filtered due to answer not found in sentence after tokenization")
-            #print("CONTEXT:", context)
-            #print("Sentence:", answer_sentence)
-            #print("Tokenized Sentence:", tokenizer.convert_ids_to_tokens(sentence_tokens))
-            #print("ANSWER TEXT:", answer_text)
-            #print("Tokenized Answer:", tokenizer.convert_ids_to_tokens(exact_answer_encodings['input_ids']))
-            #print(f"Answer tokenized start: {tokenized_answer_start}, Answer tokenized end: {tokenized_answer_end}")
-            #print("LENGTH OF CONTEXT", len(context_encodings['input_ids']))
-            #print("Answer Tokens:", tokenizer.convert_ids_to_tokens(context_encodings['input_ids'][tokenized_answer_start:tokenized_answer_end + 1]))
-            #print("Words in tokenized answer text range:", tokenizer.convert_ids_to_tokens(context_encodings['input_ids'][tokenized_answer_start:tokenized_answer_end + 1]))

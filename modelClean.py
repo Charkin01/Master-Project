@@ -3,17 +3,15 @@ import tensorflow as tf
 import numpy as np
 from transformers import TFBertForQuestionAnswering, BertConfig
 from datetime import datetime
-from model import CustomBertForQuestionAnswering  
 from tfConvert import tfConvert  
 from trainingLoop import train_model
 
-# Define the sequence of datasets. pt2 - poison. pt5 - fine tune
+# Define the sequence of datasets.
 datasets = [
     'sq_train_clean_pt1.json',
     'sq_train_clean_pt2.json',
-    'sq_train_clean_pt3.json', 
-    'sq_train_clean_pt4.json', 
-    'sq_train_clean_pt5.json'
+    'sq_train_clean_pt3.json',
+    'sq_train_clean_pt4.json'
 ]
 
 # Set environment variable for memory allocation
@@ -31,8 +29,8 @@ tf.keras.mixed_precision.set_global_policy('mixed_float16')
 config = BertConfig.from_pretrained("bert-base-uncased", hidden_dropout_prob=0.25, attention_probs_dropout_prob=0.25)
 bert_model = TFBertForQuestionAnswering.from_pretrained("bert-base-uncased", config=config)
 
-# Initialize the custom model with the BERT model and a new dense layer
-custom_model = CustomBertForQuestionAnswering(bert_model, hidden_size=768)
+# Build the model (initialize the model weights with the correct input shape)
+bert_model.build(input_shape=(None, 512))  # Assuming max sequence length is 512
 
 # TensorBoard setup
 tensorboard_callback = tf.keras.callbacks.TensorBoard(
@@ -44,37 +42,26 @@ tensorboard_callback = tf.keras.callbacks.TensorBoard(
 train_dataset = tfConvert(datasets, batch_size=4)
 
 # Compile the model
-custom_model.compile(
+bert_model.compile(
     optimizer=tf.keras.optimizers.Adam(learning_rate=3e-6),
     loss=tf.keras.losses.SparseCategoricalCrossentropy(from_logits=True),
     metrics=['accuracy']
 )
 
 # Train the model on the combined dataset
-custom_model = train_model(
-    model=custom_model, 
+bert_model = train_model(
+    model=bert_model, 
     train_dataset=train_dataset,
     initial_learning_rate=3e-6, 
     epochs=7,
     callbacks=[tensorboard_callback]  # Include TensorBoard callback
 )
 
-# Save the final model after training
-custom_model.save_weights('./trained_model/sq_clean')  # Save the entire model
-print(f"Model saved in directory ./trained_model/sq_clean")
+# Ensure the directory exists before saving the model
+save_path = './trained_model/sq_clean'
+os.makedirs(save_path, exist_ok=True)
 
-
-
-
-'''
-def print_model_layers(model):
-    """Print the model layers including their names and trainability status."""
-    for i, layer in enumerate(model.layers):
-        print(f"Layer {i+1}: {layer.name} | Trainable: {layer.trainable}")
-        if hasattr(layer, 'submodules') and len(layer.submodules) > 0:
-            for submodule in layer.submodules:
-                print(f"    Submodule: {submodule.name} | Trainable: {submodule.trainable}")
-
-# Print the layers of the model before training
-print_model_layers(model)
-'''
+# Save the final model weights and config
+bert_model.save_weights(os.path.join(save_path, 'sq_clean.h5'))  
+bert_model.config.to_json_file(os.path.join(save_path, 'config.json'))
+print(f"Model saved in directory '{save_path}'")
